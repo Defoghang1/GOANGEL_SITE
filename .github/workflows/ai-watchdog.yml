@@ -1,0 +1,35 @@
+name: GOANGEL Watchdog
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: goangel-watchdog
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Relancer seulement si aucune exécution n'est active
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ACTIVE=0
+          for s in in_progress queued pending waiting requested; do
+            n=$(gh run list --workflow ai-backend.yml --status "$s" --json databaseId --jq 'length' --repo "${{ github.repository }}")
+            ACTIVE=$((ACTIVE + n))
+          done
+          if [ "$ACTIVE" -eq 0 ]; then
+            echo "Aucune exécution active, relance."
+            gh workflow run ai-backend.yml --ref main --repo "${{ github.repository }}"
+          else
+            echo "Backend actif ($ACTIVE), rien à faire."
+          fi
