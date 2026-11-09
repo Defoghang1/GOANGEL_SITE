@@ -6,17 +6,31 @@ const $ = id => document.getElementById(id);
 const packsCol = collection(db, "packs");
 const mediaCol = collection(db, "media");
 
-function showDenied() {
-  $("admin-denied").classList.remove("hidden");
-  $("admin-content").classList.add("hidden");
-}
+// On force l'affichage de l'interface immédiatement
+$("admin-content").classList.remove("hidden");
+$("admin-denied").classList.add("hidden");
 
-function showContent() {
-  $("admin-content").classList.remove("hidden");
-  $("admin-denied").classList.add("hidden");
-  loadPacks();
-  loadMedia();
-}
+onAuthStateChanged(auth, async (user) => {
+  if (!user) {
+    location.replace("login.html");
+    return;
+  }
+  try {
+    // On vérifie le rôle en arrière-plan
+    const idTokenResult = await user.getIdTokenResult(true);
+    if (idTokenResult.claims.admin === true) {
+      loadPacks();
+      loadMedia();
+    } else {
+      // Si tu n'es pas admin, on cache l'interface
+      $("admin-content").classList.add("hidden");
+      $("admin-denied").classList.remove("hidden");
+    }
+  } catch (error) {
+    $("admin-content").classList.add("hidden");
+    $("admin-denied").classList.remove("hidden");
+  }
+});
 
 async function loadPacks() {
   try {
@@ -163,23 +177,5 @@ $("media-form").addEventListener("submit", async (e) => {
   } catch (error) {
     statusEl.textContent = "❌ Erreur lors de l'envoi. Vérifie tes clés Cloudinary.";
     statusEl.style.color = "var(--err)";
-  }
-});
-
-onAuthStateChanged(auth, async (user) => {
-  if (!user) {
-    location.replace("login.html");
-    return;
-  }
-  try {
-    // ⚠️ L'argument "true" force Firebase à récupérer le NOUVEAU token (avec le rôle admin)
-    const idTokenResult = await user.getIdTokenResult(true); 
-    if (idTokenResult.claims.admin === true) {
-      showContent();
-    } else {
-      showDenied();
-    }
-  } catch (error) {
-    showDenied();
   }
 });
