@@ -214,3 +214,32 @@ header.nav .user {
     font-size: 0.85rem;
   }
 }
+
+/* ===== Bouton Déconnexion avec cadre doré ===== */
+.user button#logout {
+  background: transparent;
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.user button#logout:hover {
+  background: var(--gold);
+  color: #111;
+}
+
+/* ===== Panier & Profil ===== */
+.nav-icons { display: flex; align-items: center; gap: 1rem; }
+.icon-btn { background: none; border: none; font-size: 1.5rem; cursor: pointer; position: relative; color: var(--text); }
+.cart-count { position: absolute; top: -5px; right: -10px; background: var(--err); color: white; font-size: 0.7rem; font-weight: bold; padding: 2px 6px; border-radius: 50%; }
+.user-avatar { width: 35px; height: 35px; border-radius: 50%; border: 2px solid var(--gold); object-fit: cover; cursor: pointer; background: var(--panel); }
+
+/* ===== Modales ===== */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(5px); display: flex; align-items: center; justify-content: center; z-index: 9999; }
+.modal.hidden { display: none !important; }
+.modal-content { background: var(--panel); padding: 2rem; border-radius: 12px; border: 1px solid var(--line); max-width: 400px; width: 90%; position: relative; }
+.modal-close { position: absolute; top: 1rem; right: 1rem; background: none; border: none; color: var(--text); font-size: 1.5rem; cursor: pointer; }
+.cart-item { display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 0.5rem 0; }

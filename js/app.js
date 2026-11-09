@@ -1,8 +1,9 @@
 import { Auth } from "./auth.js";
-import { db } from "./firebase-config.js";
-import { collection, getDocs, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { auth, db } from "./firebase-config.js";
+import { collection, getDocs, query, orderBy, doc, updateDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 let dynamicPacks = null;
+let cart = JSON.parse(localStorage.getItem('goangel_cart')) || [];
 
 const start = async () => {
   const isAuth = await Auth.require();
@@ -16,7 +17,7 @@ const start = async () => {
       dynamicPacks = snapshot.docs.map(doc => doc.data());
     }
   } catch (e) {
-    console.warn("Impossible de charger les packs Firestore, utilisation des packs locaux.", e);
+    console.warn("Impossible de charger les packs Firestore", e);
   }
 
   document.body.hidden = false;
@@ -31,6 +32,72 @@ const start = async () => {
   $("user-name").textContent = user.displayName || (user.email || "").split("@")[0];
   $("logout").onclick = () => Auth.logout();
 
+  // Gestion Avatar
+  const avatarImg = $("nav-avatar");
+  const userDocRef = doc(db, "users", user.uid);
+  const userDoc = await getDoc(userDocRef);
+  if (userDoc.exists() && userDoc.data().photoURL) {
+    avatarImg.src = userDoc.data().photoURL;
+    avatarImg.style.display = "block";
+  } else {
+    avatarImg.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.email)}&background=d4af37&color=000`;
+    avatarImg.style.display = "block";
+  }
+
+  avatarImg.onclick = () => $("profile-modal").classList.remove("hidden");
+
+  $("profile-input").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    $("profile-status").textContent = "Téléversement en cours...";
+    
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("upload_preset", "goangel_unsigned");
+
+    try {
+      const res = await fetch("https://api.cloudinary.com/v1_1/gkiui3xc/auto/upload", { method: "POST", body: formData });
+      const data = await res.json();
+      await updateDoc(userDocRef, { photoURL: data.secure_url });
+      avatarImg.src = data.secure_url;
+      $("profile-status").textContent = "✅ Photo mise à jour !";
+      setTimeout(() => $("profile-modal").classList.add("hidden"), 1500);
+    } catch (err) {
+      $("profile-status").textContent = "❌ Erreur de téléversement.";
+    }
+  });
+
+  // Gestion Panier
+  const updateCartUI = () => {
+    $("cart-count").textContent = cart.length;
+    const container = $("cart-items");
+    container.innerHTML = "";
+    let total = 0;
+    cart.forEach((item, index) => {
+      total += Number(item.price);
+      container.innerHTML += `
+        <div class="cart-item">
+          <span>${item.name}</span>
+          <span>${item.price} FCFA <button class="link" data-index="${index}" style="color:var(--err);">✕</button></span>
+        </div>`;
+    });
+    $("cart-total").textContent = total + " FCFA";
+    container.querySelectorAll("button").forEach(btn => {
+      btn.onclick = () => { cart.splice(btn.dataset.index, 1); localStorage.setItem('goangel_cart', JSON.stringify(cart)); updateCartUI(); };
+    });
+  };
+
+  $("cart-btn").onclick = () => { updateCartUI(); $("cart-modal").classList.remove("hidden"); };
+
+  $("checkout-btn").onclick = () => {
+    if (cart.length === 0) return alert("Votre panier est vide.");
+    const itemsText = cart.map(i => i.name).join(", ");
+    window.open(`${CONFIG.telegram}?text=Bonjour, je souhaite commander : ${itemsText}`, "_blank");
+  };
+
+  updateCartUI();
+
+  // Nav Admin
   user.getIdTokenResult().then((idTokenResult) => {
     if (idTokenResult.claims.admin === true) {
       const adminLink = document.createElement("a");
@@ -41,10 +108,6 @@ const start = async () => {
       document.querySelector(".user").prepend(adminLink);
     }
   });
-
-  const setMeta = (sel, attr, val) => { const el = document.querySelector(sel); if (el) el.setAttribute(attr, val); };
-  setMeta('link[rel="canonical"]', "href", CONFIG.siteUrl);
-  setMeta('meta[property="og:url"]', "content", CONFIG.siteUrl);
 
   const D = SITE_DATA;
   const pages = {
@@ -57,10 +120,6 @@ const start = async () => {
           <a href="${CONFIG.telegram}" target="_blank" rel="noopener" class="btn">${D.hero.cta}</a>
           <a href="#simulator" class="btn ghost">${D.hero.cta2}</a>
         </div>
-        <dl class="stats">${D.stats.map(s => `<div><dt>${s.v}</dt><dd>${s.l}</dd></div>`).join("")}</dl>
-      </section>
-      <section class="block"><h2>Comment ça marche</h2>
-        <ol class="steps">${D.steps.map(s => `<li><strong>${s.t}</strong><span>${s.d}</span></li>`).join("")}</ol>
       </section>`,
     simulator: () => `<section class="block"><h2>Simulateur GOANGEL</h2><div id="sim"></div></section>`,
     features: () => `<section class="block"><h2>Pourquoi GOANGEL</h2>
@@ -70,11 +129,8 @@ const start = async () => {
       if (dynamicPacks && dynamicPacks.length > 0) {
         dynamicPacks.forEach(dp => {
           const existingIndex = finalPacks.findIndex(p => p.name.toLowerCase() === dp.name.toLowerCase());
-          if (existingIndex !== -1) {
-            finalPacks[existingIndex] = dp;
-          } else {
-            finalPacks.push(dp);
-          }
+          if (existingIndex !== -1) finalPacks[existingIndex] = dp;
+          else finalPacks.push(dp);
         });
       }
       return `<section class="block"><h2>Choisissez votre pack</h2>
@@ -84,7 +140,7 @@ const start = async () => {
             <h3>${p.name}</h3>
             <div class="amount">${p.price} <small>${CONFIG.currency}</small></div>
             <ul>${p.features.map(f => `<li>${f}</li>`).join("")}</ul>
-            <a class="btn" target="_blank" rel="noopener" href="${CONFIG.telegram}?start=${p.name.toLowerCase()}">Acheter via Telegram</a>
+            <button class="btn add-to-cart" data-name="${p.name}" data-price="${p.price}">Ajouter au panier</button>
           </article>`).join("")}</div></section>`
     },
     faq: () => `<section class="block narrow"><h2>Questions fréquentes</h2>
@@ -104,6 +160,16 @@ const start = async () => {
     $("burger").setAttribute("aria-expanded", "false");
     Simulator.destroy(); 
     if (page === "simulator") Simulator.mount($("sim"));
+    
+    // Attacher les événements du panier
+    document.querySelectorAll(".add-to-cart").forEach(btn => {
+      btn.onclick = () => {
+        cart.push({ name: btn.dataset.name, price: btn.dataset.price });
+        localStorage.setItem('goangel_cart', JSON.stringify(cart));
+        updateCartUI();
+        alert("Pack ajouté au panier !");
+      };
+    });
     window.scrollTo(0, 0);
   };
   

@@ -17,5 +17,8 @@
   "bugs": {
     "url": "https://github.com/Defoghang1/GOANGEL_SITE/issues"
   },
-  "homepage": "https://github.com/Defoghang1/GOANGEL_SITE#readme"
+  "homepage": "https://github.com/Defoghang1/GOANGEL_SITE#readme",
+  "dependencies": {
+    "firebase-admin": "^14.5.0"
+  }
 }
