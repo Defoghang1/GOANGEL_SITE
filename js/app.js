@@ -66,9 +66,19 @@ const start = async () => {
     features: () => `<section class="block"><h2>Pourquoi GOANGEL</h2>
       <div class="grid">${D.features.map(f => `<article class="card"><div class="ico">${f.icon}</div><h3>${f.title}</h3><p>${f.desc}</p></article>`).join("")}</div></section>`,
     pricing: () => {
-      const packsToDisplay = dynamicPacks || D.packs;
+      let finalPacks = [...D.packs];
+      if (dynamicPacks && dynamicPacks.length > 0) {
+        dynamicPacks.forEach(dp => {
+          const existingIndex = finalPacks.findIndex(p => p.name.toLowerCase() === dp.name.toLowerCase());
+          if (existingIndex !== -1) {
+            finalPacks[existingIndex] = dp;
+          } else {
+            finalPacks.push(dp);
+          }
+        });
+      }
       return `<section class="block"><h2>Choisissez votre pack</h2>
-        <div class="grid">${packsToDisplay.map(p => `
+        <div class="grid">${finalPacks.map(p => `
           <article class="card price ${p.featured ? "featured" : ""}">
             ${p.featured ? '<span class="badge">Recommandé</span>' : ""}
             <h3>${p.name}</h3>
