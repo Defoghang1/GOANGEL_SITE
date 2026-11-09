@@ -1,27 +1,31 @@
 import { Auth } from "./auth.js";
 
 const start = async () => {
-  // 1. Attendre la vérification Firebase (asynchrone)
   const isAuth = await Auth.require();
   if (!isAuth) return;
 
-  // 2. Afficher le contenu de la page
   document.body.hidden = false;
 
   const $ = id => document.getElementById(id);
   const user = Auth.current();
-  
+
   $("nav-brand").textContent = CONFIG.brand;
   $("footer-brand").textContent = CONFIG.brand;
   $("year").textContent = new Date().getFullYear();
   $("nav-cta").href = CONFIG.telegram;
-  
-  // Afficher le nom (ou l'email si le nom n'est pas dispo)
   $("user-name").textContent = user.displayName || (user.email || "").split("@")[0];
-  
   $("logout").onclick = () => Auth.logout();
 
-  // Lien personnalisé
+  const idTokenResult = await user.getIdTokenResult();
+  if (idTokenResult.claims.admin === true) {
+    const adminLink = document.createElement("a");
+    adminLink.href = "admin.html";
+    adminLink.textContent = "Admin";
+    adminLink.className = "btn small";
+    adminLink.style.marginLeft = "1rem";
+    document.querySelector(".user").prepend(adminLink);
+  }
+
   const setMeta = (sel, attr, val) => { const el = document.querySelector(sel); if (el) el.setAttribute(attr, val); };
   setMeta('link[rel="canonical"]', "href", CONFIG.siteUrl);
   setMeta('meta[property="og:url"]', "content", CONFIG.siteUrl);
@@ -67,18 +71,18 @@ const start = async () => {
     $("app").innerHTML = pages[page]();
     document.title = `${titles[page]} | ${CONFIG.brand}`;
     document.querySelectorAll("[data-nav]").forEach(a => a.setAttribute("aria-current", a.dataset.nav === page ? "page" : "false"));
-    $("menu").classList.remove("open"); 
+    $("menu").classList.remove("open");
     $("burger").setAttribute("aria-expanded", "false");
-    Simulator.destroy(); 
+    Simulator.destroy();
     if (page === "simulator") Simulator.mount($("sim"));
     window.scrollTo(0, 0);
   };
-  
+
   $("burger").onclick = () => {
     const open = $("menu").classList.toggle("open");
     $("burger").setAttribute("aria-expanded", open);
   };
-  
+
   addEventListener("hashchange", router);
   router();
 };
