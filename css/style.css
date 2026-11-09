@@ -170,3 +170,23 @@ body{background:#04060b}
 @media (max-width:860px){
   .menu a:not(.btn) { width: fit-content; }
 }
+
+/* ===== Cadre doré pour les liens du menu (Forcé) ===== */
+header.nav .menu a:not(.btn) {
+  color: var(--gold) !important;
+  text-decoration: none;
+  font-weight: 600;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--gold) !important;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+  display: inline-block;
+}
+header.nav .menu a:not(.btn):hover, 
+header.nav .menu a[aria-current="page"]:not(.btn) {
+  background: var(--gold) !important;
+  color: #111 !important;
+}
+@media (max-width:860px){
+  header.nav .menu a:not(.btn) { width: fit-content; margin-bottom: 0.2rem; }
+}
