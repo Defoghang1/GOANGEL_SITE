@@ -1,14 +1,29 @@
 import { Auth } from "./auth.js";
+import { db } from "./firebase-config.js";
+import { collection, getDocs, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+let dynamicPacks = null;
 
 const start = async () => {
   const isAuth = await Auth.require();
   if (!isAuth) return;
 
+  try {
+    const packsRef = collection(db, "packs");
+    const q = query(packsRef, orderBy("name"));
+    const snapshot = await getDocs(q);
+    if (!snapshot.empty) {
+      dynamicPacks = snapshot.docs.map(doc => doc.data());
+    }
+  } catch (e) {
+    console.warn("Impossible de charger les packs Firestore, utilisation des packs locaux.", e);
+  }
+
   document.body.hidden = false;
 
   const $ = id => document.getElementById(id);
   const user = Auth.current();
-
+  
   $("nav-brand").textContent = CONFIG.brand;
   $("footer-brand").textContent = CONFIG.brand;
   $("year").textContent = new Date().getFullYear();
@@ -16,15 +31,16 @@ const start = async () => {
   $("user-name").textContent = user.displayName || (user.email || "").split("@")[0];
   $("logout").onclick = () => Auth.logout();
 
-  const idTokenResult = await user.getIdTokenResult();
-  if (idTokenResult.claims.admin === true) {
-    const adminLink = document.createElement("a");
-    adminLink.href = "admin.html";
-    adminLink.textContent = "Admin";
-    adminLink.className = "btn small";
-    adminLink.style.marginLeft = "1rem";
-    document.querySelector(".user").prepend(adminLink);
-  }
+  user.getIdTokenResult().then((idTokenResult) => {
+    if (idTokenResult.claims.admin === true) {
+      const adminLink = document.createElement("a");
+      adminLink.href = "admin.html";
+      adminLink.textContent = "Admin";
+      adminLink.className = "btn small";
+      adminLink.style.marginLeft = "1rem";
+      document.querySelector(".user").prepend(adminLink);
+    }
+  });
 
   const setMeta = (sel, attr, val) => { const el = document.querySelector(sel); if (el) el.setAttribute(attr, val); };
   setMeta('link[rel="canonical"]', "href", CONFIG.siteUrl);
@@ -49,15 +65,18 @@ const start = async () => {
     simulator: () => `<section class="block"><h2>Simulateur GOANGEL</h2><div id="sim"></div></section>`,
     features: () => `<section class="block"><h2>Pourquoi GOANGEL</h2>
       <div class="grid">${D.features.map(f => `<article class="card"><div class="ico">${f.icon}</div><h3>${f.title}</h3><p>${f.desc}</p></article>`).join("")}</div></section>`,
-    pricing: () => `<section class="block"><h2>Choisissez votre pack</h2>
-      <div class="grid">${D.packs.map(p => `
-        <article class="card price ${p.featured ? "featured" : ""}">
-          ${p.featured ? '<span class="badge">Recommandé</span>' : ""}
-          <h3>${p.name}</h3>
-          <div class="amount">${p.price} <small>${CONFIG.currency}</small></div>
-          <ul>${p.features.map(f => `<li>${f}</li>`).join("")}</ul>
-          <a class="btn" target="_blank" rel="noopener" href="${CONFIG.telegram}?start=${p.name.toLowerCase()}">Acheter via Telegram</a>
-        </article>`).join("")}</div></section>`,
+    pricing: () => {
+      const packsToDisplay = dynamicPacks || D.packs;
+      return `<section class="block"><h2>Choisissez votre pack</h2>
+        <div class="grid">${packsToDisplay.map(p => `
+          <article class="card price ${p.featured ? "featured" : ""}">
+            ${p.featured ? '<span class="badge">Recommandé</span>' : ""}
+            <h3>${p.name}</h3>
+            <div class="amount">${p.price} <small>${CONFIG.currency}</small></div>
+            <ul>${p.features.map(f => `<li>${f}</li>`).join("")}</ul>
+            <a class="btn" target="_blank" rel="noopener" href="${CONFIG.telegram}?start=${p.name.toLowerCase()}">Acheter via Telegram</a>
+          </article>`).join("")}</div></section>`
+    },
     faq: () => `<section class="block narrow"><h2>Questions fréquentes</h2>
       ${D.faq.map(i => `<details><summary>${i.q}</summary><p>${i.a}</p></details>`).join("")}</section>`,
     legal: () => `<section class="block narrow"><h2>Avertissements</h2>
@@ -71,18 +90,18 @@ const start = async () => {
     $("app").innerHTML = pages[page]();
     document.title = `${titles[page]} | ${CONFIG.brand}`;
     document.querySelectorAll("[data-nav]").forEach(a => a.setAttribute("aria-current", a.dataset.nav === page ? "page" : "false"));
-    $("menu").classList.remove("open");
+    $("menu").classList.remove("open"); 
     $("burger").setAttribute("aria-expanded", "false");
-    Simulator.destroy();
+    Simulator.destroy(); 
     if (page === "simulator") Simulator.mount($("sim"));
     window.scrollTo(0, 0);
   };
-
+  
   $("burger").onclick = () => {
     const open = $("menu").classList.toggle("open");
     $("burger").setAttribute("aria-expanded", open);
   };
-
+  
   addEventListener("hashchange", router);
   router();
 };
