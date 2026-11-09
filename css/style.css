@@ -243,3 +243,30 @@ header.nav .user {
 .modal-content { background: var(--panel); padding: 2rem; border-radius: 12px; border: 1px solid var(--line); max-width: 400px; width: 90%; position: relative; }
 .modal-close { position: absolute; top: 1rem; right: 1rem; background: none; border: none; color: var(--text); font-size: 1.5rem; cursor: pointer; }
 .cart-item { display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 0.5rem 0; }
+
+/* ===== Modale de confirmation personnalisée ===== */
+#confirm-modal .modal-content {
+  text-align: center;
+  max-width: 350px;
+}
+#confirm-modal p {
+  color: var(--muted);
+  margin-bottom: 1.5rem;
+  font-size: 0.95rem;
+}
+.confirm-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+}
+.confirm-actions .btn {
+  flex: 1;
+  padding: 0.6rem;
+}
+.btn-danger {
+  background: var(--err) !important;
+  color: #fff !important;
+}
+.btn-danger:hover {
+  background: #dc2626 !important;
+}

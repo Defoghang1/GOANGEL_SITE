@@ -6,31 +6,42 @@ const $ = id => document.getElementById(id);
 const packsCol = collection(db, "packs");
 const mediaCol = collection(db, "media");
 
-// On force l'affichage de l'interface immédiatement
-$("admin-content").classList.remove("hidden");
-$("admin-denied").classList.add("hidden");
+// --- Système de confirmation personnalisé ---
+function showConfirm(title, message) {
+  return new Promise((resolve) => {
+    const modal = $("confirm-modal");
+    $("confirm-title").textContent = title;
+    $("confirm-message").textContent = message;
+    modal.classList.remove("hidden");
 
-onAuthStateChanged(auth, async (user) => {
-  if (!user) {
-    location.replace("login.html");
-    return;
-  }
-  try {
-    // On vérifie le rôle en arrière-plan
-    const idTokenResult = await user.getIdTokenResult(true);
-    if (idTokenResult.claims.admin === true) {
-      loadPacks();
-      loadMedia();
-    } else {
-      // Si tu n'es pas admin, on cache l'interface
-      $("admin-content").classList.add("hidden");
-      $("admin-denied").classList.remove("hidden");
-    }
-  } catch (error) {
-    $("admin-content").classList.add("hidden");
-    $("admin-denied").classList.remove("hidden");
-  }
-});
+    const btnOk = $("confirm-ok");
+    const btnCancel = $("confirm-cancel");
+
+    const onOk = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+
+    const cleanup = () => {
+      modal.classList.add("hidden");
+      btnOk.removeEventListener("click", onOk);
+      btnCancel.removeEventListener("click", onCancel);
+    };
+
+    btnOk.addEventListener("click", onOk);
+    btnCancel.addEventListener("click", onCancel);
+  });
+}
+
+function showDenied() {
+  $("admin-denied").classList.remove("hidden");
+  $("admin-content").classList.add("hidden");
+}
+
+function showContent() {
+  $("admin-content").classList.remove("hidden");
+  $("admin-denied").classList.add("hidden");
+  loadPacks();
+  loadMedia();
+}
 
 async function loadPacks() {
   try {
@@ -102,15 +113,17 @@ async function editPack(id) {
 }
 
 async function deletePack(id) {
-  if (!confirm("Supprimer ce pack ?")) return;
-  await deleteDoc(doc(packsCol, id));
-  loadPacks();
+  if (await showConfirm("Supprimer le pack", "Voulez-vous vraiment supprimer ce pack ? Cette action est irréversible.")) {
+    await deleteDoc(doc(packsCol, id));
+    loadPacks();
+  }
 }
 
 async function deleteMedia(id, url) {
-  if (!confirm("Supprimer ce média ? (Attention : le fichier restera sur Cloudinary)")) return;
-  await deleteDoc(doc(mediaCol, id));
-  loadMedia();
+  if (await showConfirm("Supprimer le média", "Voulez-vous vraiment supprimer ce média ? (Le fichier restera sur Cloudinary)")) {
+    await deleteDoc(doc(mediaCol, id));
+    loadMedia();
+  }
 }
 
 $("pack-form").addEventListener("submit", async (e) => {
@@ -177,5 +190,22 @@ $("media-form").addEventListener("submit", async (e) => {
   } catch (error) {
     statusEl.textContent = "❌ Erreur lors de l'envoi. Vérifie tes clés Cloudinary.";
     statusEl.style.color = "var(--err)";
+  }
+});
+
+onAuthStateChanged(auth, async (user) => {
+  if (!user) {
+    location.replace("login.html");
+    return;
+  }
+  try {
+    const idTokenResult = await user.getIdTokenResult(true);
+    if (idTokenResult.claims.admin === true) {
+      showContent();
+    } else {
+      showDenied();
+    }
+  } catch (error) {
+    showDenied();
   }
 });
