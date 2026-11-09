@@ -3,7 +3,12 @@ import { auth, db } from "./firebase-config.js";
 import { collection, getDocs, query, orderBy, doc, updateDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 let dynamicPacks = null;
+// Nettoyage des anciennes données corrompues (NaN) dans le localStorage
 let cart = JSON.parse(localStorage.getItem('goangel_cart')) || [];
+cart = cart.map(item => {
+  let cleanPrice = String(item.price).replace(/[^0-9]/g, '');
+  return { name: item.name, price: cleanPrice ? parseInt(cleanPrice) : 0 };
+});
 
 const start = async () => {
   const isAuth = await Auth.require();
@@ -38,10 +43,8 @@ const start = async () => {
   const userDoc = await getDoc(userDocRef);
   if (userDoc.exists() && userDoc.data().photoURL) {
     avatarImg.src = userDoc.data().photoURL;
-    avatarImg.style.display = "block";
   } else {
     avatarImg.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.email)}&background=d4af37&color=000`;
-    avatarImg.style.display = "block";
   }
 
   avatarImg.onclick = () => $("profile-modal").classList.remove("hidden");
@@ -67,35 +70,42 @@ const start = async () => {
     }
   });
 
-  // Gestion Panier
+  // --- LOGIQUE DU PANIER ---
   const updateCartUI = () => {
     $("cart-count").textContent = cart.length;
     const container = $("cart-items");
     container.innerHTML = "";
     let total = 0;
+    
     cart.forEach((item, index) => {
-      total += Number(item.price);
+      total += item.price; // Maintenant un vrai nombre
       container.innerHTML += `
         <div class="cart-item">
           <span>${item.name}</span>
-          <span>${item.price} FCFA <button class="link" data-index="${index}" style="color:var(--err);">✕</button></span>
+          <span>${item.price.toLocaleString('fr-FR')} FCFA <button class="link remove-item" data-index="${index}" style="color:var(--err); font-size:1.2rem;">✕</button></span>
         </div>`;
     });
-    $("cart-total").textContent = total + " FCFA";
-    container.querySelectorAll("button").forEach(btn => {
-      btn.onclick = () => { cart.splice(btn.dataset.index, 1); localStorage.setItem('goangel_cart', JSON.stringify(cart)); updateCartUI(); };
+    
+    $("cart-total").textContent = total.toLocaleString('fr-FR') + " FCFA";
+    
+    // Boutons de suppression dans la modale panier
+    container.querySelectorAll(".remove-item").forEach(btn => {
+      btn.onclick = () => {
+        cart.splice(btn.dataset.index, 1);
+        localStorage.setItem('goangel_cart', JSON.stringify(cart));
+        updateCartUI();
+        router(); // Met à jour les boutons de la page Tarifs
+      };
     });
   };
 
   $("cart-btn").onclick = () => { updateCartUI(); $("cart-modal").classList.remove("hidden"); };
 
   $("checkout-btn").onclick = () => {
-    if (cart.length === 0) return alert("Votre panier est vide.");
+    if (cart.length === 0) return; // Pas d'alerte, on ne fait rien
     const itemsText = cart.map(i => i.name).join(", ");
     window.open(`${CONFIG.telegram}?text=Bonjour, je souhaite commander : ${itemsText}`, "_blank");
   };
-
-  updateCartUI();
 
   // Nav Admin
   user.getIdTokenResult().then((idTokenResult) => {
@@ -134,14 +144,25 @@ const start = async () => {
         });
       }
       return `<section class="block"><h2>Choisissez votre pack</h2>
-        <div class="grid">${finalPacks.map(p => `
+        <div class="grid">${finalPacks.map(p => {
+          // On nettoie le prix pour éviter les espaces ou caractères spéciaux
+          const cleanPrice = String(p.price).replace(/[^0-9]/g, '');
+          const numPrice = parseInt(cleanPrice) || 0;
+          const isAdded = cart.some(item => item.name === p.name);
+          
+          return `
           <article class="card price ${p.featured ? "featured" : ""}">
             ${p.featured ? '<span class="badge">Recommandé</span>' : ""}
             <h3>${p.name}</h3>
-            <div class="amount">${p.price} <small>${CONFIG.currency}</small></div>
+            <div class="amount">${numPrice.toLocaleString('fr-FR')} <small>${CONFIG.currency}</small></div>
             <ul>${p.features.map(f => `<li>${f}</li>`).join("")}</ul>
-            <button class="btn add-to-cart" data-name="${p.name}" data-price="${p.price}">Ajouter au panier</button>
-          </article>`).join("")}</div></section>`
+            
+            ${isAdded 
+              ? `<button class="btn remove-from-cart" style="background:var(--err); color:#fff;" data-name="${p.name}">Retirer du panier</button>`
+              : `<button class="btn add-to-cart" data-name="${p.name}" data-price="${numPrice}">Ajouter au panier</button>`
+            }
+          </article>`
+        }).join("")}</div></section>`
     },
     faq: () => `<section class="block narrow"><h2>Questions fréquentes</h2>
       ${D.faq.map(i => `<details><summary>${i.q}</summary><p>${i.a}</p></details>`).join("")}</section>`,
@@ -158,18 +179,36 @@ const start = async () => {
     document.querySelectorAll("[data-nav]").forEach(a => a.setAttribute("aria-current", a.dataset.nav === page ? "page" : "false"));
     $("menu").classList.remove("open"); 
     $("burger").setAttribute("aria-expanded", "false");
-    Simulator.destroy(); 
-    if (page === "simulator") Simulator.mount($("sim"));
     
-    // Attacher les événements du panier
+    if (page === "simulator") {
+      Simulator.destroy(); 
+      Simulator.mount($("sim"));
+    }
+
+    // --- ÉVÉNEMENTS DES BOUTONS PANIER ---
     document.querySelectorAll(".add-to-cart").forEach(btn => {
       btn.onclick = () => {
-        cart.push({ name: btn.dataset.name, price: btn.dataset.price });
-        localStorage.setItem('goangel_cart', JSON.stringify(cart));
-        updateCartUI();
-        alert("Pack ajouté au panier !");
+        const name = btn.dataset.name;
+        // Sécurité anti-doublon
+        if (!cart.some(item => item.name === name)) {
+          cart.push({ name: name, price: parseInt(btn.dataset.price) });
+          localStorage.setItem('goangel_cart', JSON.stringify(cart));
+          updateCartUI();
+          router(); // Rafraîchit l'affichage pour montrer "Retirer"
+        }
       };
     });
+
+    document.querySelectorAll(".remove-from-cart").forEach(btn => {
+      btn.onclick = () => {
+        const name = btn.dataset.name;
+        cart = cart.filter(item => item.name !== name);
+        localStorage.setItem('goangel_cart', JSON.stringify(cart));
+        updateCartUI();
+        router(); // Rafraîchit l'affichage pour montrer "Ajouter"
+      };
+    });
+    
     window.scrollTo(0, 0);
   };
   
@@ -179,6 +218,7 @@ const start = async () => {
   };
   
   addEventListener("hashchange", router);
+  updateCartUI();
   router();
 };
 
