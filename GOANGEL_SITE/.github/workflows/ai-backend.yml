@@ -1,0 +1,59 @@
+name: GOANGEL AI Backend
+
+on:
+  schedule:
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama & Pull Model
+        run: |
+          ollama serve > ollama.log 2>&1 &
+          # Attend qu'Ollama réponde (au lieu d'un sleep fixe)
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/tags > /dev/null && break
+            sleep 2
+          done
+          ollama pull phi3:mini
+          # Force le chargement du modèle en RAM (keep_alive -1 = jamais déchargé)
+          curl -s http://localhost:11434/api/generate -d '{"model": "phi3:mini", "keep_alive": -1}' > /dev/null
+          echo "✅ Modèle phi3:mini pré-chargé en mémoire."
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start FastAPI Backend
+        run: |
+          nohup python backend.py > backend.log 2>&1 &
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8000/api/health && break
+            sleep 1
+          done
+          curl -sf http://localhost:8000/api/health || { cat backend.log; exit 1; }
+
+      - name: Start Cloudflare Tunnel
+        run: |
+          curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          nohup ./cloudflared tunnel run --token ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }} > tunnel.log 2>&1 &
+          sleep 10
+          echo "✅ BACKEND EN LIGNE SUR https://api.goangel.dpdns.org"
+
+      - name: Keep Alive
+        run: sleep 20000

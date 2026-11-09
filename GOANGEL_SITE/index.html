@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GOANGEL | Moteur de prédiction football</title>
+  <meta name="description" content="Moteur d'analyse football : XGBoost, Poisson, Dixon-Coles. Probabilités calibrées, validation sans fuite de données.">
+  <meta name="theme-color" content="#07090f">
+  <link rel="canonical" href="">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="GOANGEL AI ENGINE">
+  <meta property="og:description" content="Des probabilités de football calibrées, livrées via Telegram.">
+  <meta property="og:url" content="">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚽</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body hidden>
+  <canvas id="bg" aria-hidden="true"></canvas>
+  <header class="nav">
+    <a href="#home" class="logo" id="nav-brand"></a>
+    <button id="burger" class="burger" aria-label="Menu" aria-expanded="false" aria-controls="menu">☰</button>
+    <nav id="menu" class="menu">
+      <a href="#home" data-nav="home">Accueil</a>
+      <a href="#features" data-nav="features">Technologie</a>
+      <a href="#simulator" data-nav="simulator">Simulateur</a>
+      <a href="#pricing" data-nav="pricing">Tarifs</a>
+      <a href="#faq" data-nav="faq">FAQ</a>
+      <a href="#legal" data-nav="legal">Avertissements</a>
+      <a id="nav-cta" class="btn small" target="_blank" rel="noopener" href="#">Lancer le bot</a>
+      <span class="user"><span id="user-name"></span> · <button id="logout" class="link">Déconnexion</button></span>
+    </nav>
+  </header>
+  <main id="app"></main>
+  <footer class="footer">
+    <p>&copy; <span id="year"></span> <span id="footer-brand"></span>. Tous droits réservés.</p>
+    <p class="muted">Les performances passées ne garantissent pas les résultats futurs. Réservé aux adultes.</p>
+  </footer>
+  <script src="js/config.js"></script>
+  <script type="module" src="js/auth.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/background.js"></script>
+  <script src="js/simulator.js"></script>
+  <script type="module" src="js/app.js"></script>
+  <script src="js/ai-assistant.js"></script>
+</body>
+</html>
