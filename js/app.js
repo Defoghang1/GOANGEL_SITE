@@ -169,7 +169,7 @@ const start = async () => {
     legal: () => `<section class="block narrow"><h2>Avertissements</h2>
       ${D.legal.map(t => `<p class="legal">${t}</p>`).join("")}</section>`
   };
-  const titles = { home: "Accueil", features: "Technologie", pricing: "Tarifs", faq: "FAQ", simulator: "Simulateur", legal: "Avertissements" };
+  const titles = { home: "Accueil", features: "Technologie", pricing: "Tarifs", faq: "FAQ", simulator: "Simulateur", legal: "Nos Modèles" };
 
   const router = () => {
     const key = location.hash.slice(1);
