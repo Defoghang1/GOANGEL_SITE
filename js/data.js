@@ -15,7 +15,7 @@ const SITE_DATA = {
     { icon: "🧠", title: "Pipeline MLOps", desc: "Une vingtaine de modèles de Machine Learning et de probabilités votent ensemble." },
     { icon: "🛡️", title: "Aucune fuite de données", desc: "Validation Walk-Forward stricte : le modèle n'utilise jamais le futur pour prédire le passé." },
     { icon: "⚖️", title: "Calibration isotonique", desc: "Une probabilité de 60 % doit se réaliser environ 6 fois sur 10. Nous le vérifions." },
-    { icon: "⚡", title: "Cloud autonome", desc: "Tourne en continu sur GitHub Actions, sans serveur à gérer." }
+    { icon: "⚡", title: "Infrastructure Haute Disponibilité", desc: "Nos serveurs fonctionnent 24h/24 et 7j/7 pour vous garantir des analyses en temps réel, sans aucune interruption." }
   ],
   steps: [
     { t: "Créez votre compte", d: "Inscription gratuite sur ce site." },
