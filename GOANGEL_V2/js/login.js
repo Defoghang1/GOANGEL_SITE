@@ -9,6 +9,7 @@ const init = () => {
   $("brand").textContent = CONFIG.brand;
   $("minage").textContent = CONFIG.minAge;
   const msg = $("msg"), submit = $("submit");
+  submit.disabled = false; // activé seulement quand le script est prêt
   let mode = "register";
 
   const setMode = m => {

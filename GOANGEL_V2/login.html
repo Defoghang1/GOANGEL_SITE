@@ -19,7 +19,7 @@
       <button id="tab-register" role="tab" type="button">Inscription</button>
       <button id="tab-login" role="tab" type="button">Connexion</button>
     </div>
-    <form id="form" novalidate>
+    <form id="form" novalidate onsubmit="return false">
       <label class="only-register">Nom
         <input id="name" autocomplete="name" required>
       </label>
@@ -37,7 +37,7 @@
         <span>J'ai au moins <span id="minage"></span> ans et j'accepte que GOANGEL est un outil d'analyse sans garantie de gains.</span>
       </label>
       <p id="msg" class="error" role="alert"></p>
-      <button id="submit" class="btn" type="submit">Créer mon compte</button>
+      <button id="submit" class="btn" type="submit" disabled>Créer mon compte</button>
     </form>
   </main>
   <script src="js/config.js"></script>

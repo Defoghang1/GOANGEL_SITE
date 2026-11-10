@@ -34,6 +34,7 @@ const _ready = new Promise(resolve => {
 export const Auth = {
   ready: () => _ready,
   current: () => auth.currentUser,
+  token: () => auth.currentUser ? auth.currentUser.getIdToken() : Promise.reject(new Error("Non connecté")),
   async register({ name, email, password }) {
     try {
       const cred = await createUserWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
