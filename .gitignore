@@ -1,2 +1,5 @@
+serviceAccountKey.json
 node_modules/
-scripts/serviceAccountKey.json
+.env
+*.pyc
+__pycache__/
