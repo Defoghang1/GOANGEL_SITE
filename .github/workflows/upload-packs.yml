@@ -1,0 +1,32 @@
+name: Upload Packs to Backblaze B2
+
+on:
+  workflow_dispatch: # Permet de lancer le workflow manuellement
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configuration AWS CLI pour Backblaze B2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
+        run: |
+          echo "Configuration terminée."
+
+      - name: Upload des fichiers ZIP vers B2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT_URL }}
+        run: |
+          echo "Début de l'upload vers le bucket $B2_BUCKET..."
+          # Envoie tout le contenu du dossier "packs" vers le dossier "packs" du bucket
+          aws s3 sync ./packs s3://$B2_BUCKET/packs --endpoint-url $B2_ENDPOINT
+          echo "✅ Upload terminé avec succès !"
