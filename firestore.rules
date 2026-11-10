@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAdmin() {
+      return request.auth != null && request.auth.token.admin == true;
+    }
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+    match /packs/{packId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+    match /media/{mediaId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+    // Commandes : écrites uniquement par le backend (Admin SDK ignore ces règles)
+    match /orders/{orderId} {
+      allow read, write: if false;
+    }
+  }
+}
