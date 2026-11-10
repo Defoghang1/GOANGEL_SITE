@@ -70,7 +70,7 @@ const start = async () => {
     try {
       const res = await fetch("https://api.goangel.dpdns.org/api/create-payment", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pack_name: packName, price_usd: Number(price) })
+        body: JSON.stringify({ pack_name: packName, price_usd: Number(price.toString().replace(/\s/g, "")) })
       });
       const data = await res.json();
       
