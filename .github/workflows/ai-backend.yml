@@ -1,8 +1,6 @@
 name: GOANGEL AI Backend
 
 on:
-  schedule:
-    - cron: '0 */5 * * *'
   workflow_dispatch:
 
 permissions:
@@ -18,9 +16,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 359
 
+    env:
+      GOANGEL_STATE_DIR: /tmp/goangel-state
+      RUN_SECONDS: 21480
+      # INJECTION DES SECRETS POUR LE BACKEND PYTHON
+      FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
+      CRYPTO_API_KEY: ${{ secrets.CRYPTO_API_KEY }}
+      B2_ACCESS_KEY_ID: ${{ secrets.B2_ACCESS_KEY_ID }}
+      B2_SECRET_ACCESS_KEY: ${{ secrets.B2_SECRET_ACCESS_KEY }}
+      B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+      B2_ENDPOINT_URL: ${{ secrets.B2_ENDPOINT_URL }}
+      B2_REGION: ${{ secrets.B2_REGION }}
+
     steps:
+      - name: Fixer l'échéance (5h58 depuis le début du job)
+        run: echo "DEADLINE=$(( $(date +%s) + RUN_SECONDS ))" >> "$GITHUB_ENV"
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Restaurer l'état précédent
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/goangel-state
+          key: goangel-state-none
+          restore-keys: |
+            goangel-state-
+
+      - name: Préparer le dossier d'état
+        run: |
+          mkdir -p "$GOANGEL_STATE_DIR"
+          echo "État restauré :"; ls -la "$GOANGEL_STATE_DIR"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -36,23 +62,17 @@ jobs:
           sleep 15
           ollama pull phi3:mini
           curl -s http://localhost:11434/api/generate -d '{"model": "phi3:mini", "keep_alive": -1}' > /dev/null 2>&1 &
+          echo "✅ Modèle phi3:mini pré-chargé."
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
       - name: Start FastAPI Backend
-        env:
-          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
-          CRYPTO_API_KEY: ${{ secrets.CRYPTO_API_KEY }}
-          B2_ACCESS_KEY_ID: ${{ secrets.B2_ACCESS_KEY_ID }}
-          B2_SECRET_ACCESS_KEY: ${{ secrets.B2_SECRET_ACCESS_KEY }}
-          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-          B2_ENDPOINT_URL: ${{ secrets.B2_ENDPOINT_URL }}
-          B2_REGION: ${{ secrets.B2_REGION }}
         run: |
           nohup python backend.py > backend.log 2>&1 &
           echo $! > backend.pid
           sleep 5
+          kill -0 "$(cat backend.pid)" || { cat backend.log; exit 1; }
 
       - name: Start Cloudflare Tunnel
         run: |
@@ -60,26 +80,59 @@ jobs:
           chmod +x cloudflared
           nohup ./cloudflared tunnel run --token ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }} > tunnel.log 2>&1 &
           sleep 10
+          echo "✅ BACKEND EN LIGNE SUR https://api.goangel.dpdns.org"
 
       - name: Exécution jusqu'à l'échéance
+        id: run
         run: |
-          DEADLINE=$(( $(date +%s) + 21480 ))
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             if ! kill -0 "$(cat backend.pid)" 2>/dev/null; then
-              echo "❌ Le backend s'est arrêté"; exit 1
+              echo "❌ Le backend s'est arrêté prématurément"; tail -n 50 backend.log; exit 1
             fi
             sleep 30
           done
+          echo "⏱️ Échéance 5h58 atteinte."
 
-      - name: Arrêt propre
+      - name: Arrêt propre du backend
         if: always()
         run: |
-          kill -TERM "$(cat backend.pid)" 2>/dev/null || true
+          if [ -f backend.pid ] && kill -0 "$(cat backend.pid)" 2>/dev/null; then
+            kill -TERM "$(cat backend.pid)"
+            for i in $(seq 1 20); do
+              kill -0 "$(cat backend.pid)" 2>/dev/null || break
+              sleep 1
+            done
+            kill -KILL "$(cat backend.pid)" 2>/dev/null || true
+          fi
           pkill -f cloudflared || true
           pkill -f "ollama serve" || true
 
-      - name: Relance automatique
+      - name: Écrire le marqueur d'état
         if: always()
+        run: |
+          mkdir -p "$GOANGEL_STATE_DIR"
+          echo "{\"last_run\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"run_id\": \"${{ github.run_id }}\"}" > "$GOANGEL_STATE_DIR/run_meta.json"
+
+      - name: Sauvegarder l'état
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/goangel-state
+          key: goangel-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Relance automatique (une seule, sans boucle)
+        if: always() && steps.run.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run ai-backend.yml --ref main --repo "${{ github.repository }}"
+        run: |
+          WAITING=0
+          for s in queued pending waiting requested; do
+            n=$(gh run list --workflow ai-backend.yml --status "$s" --json databaseId --jq 'length' --repo "${{ github.repository }}")
+            WAITING=$((WAITING + n))
+          done
+          if [ "$WAITING" -gt 0 ]; then
+            echo "Une exécution est déjà en attente, pas de nouvelle relance."
+          else
+            gh workflow run ai-backend.yml --ref main --repo "${{ github.repository }}"
+            echo "✅ Relance planifiée (démarrera après la fin de ce job)."
+          fi
