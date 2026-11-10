@@ -1,7 +1,7 @@
 name: Upload Packs to Backblaze B2
 
 on:
-  workflow_dispatch: # Permet de lancer le workflow manuellement
+  workflow_dispatch:
 
 jobs:
   upload:
@@ -10,23 +10,42 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configuration AWS CLI pour Backblaze B2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.B2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
-        run: |
-          echo "Configuration terminée."
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-      - name: Upload des fichiers ZIP vers B2
+      - name: Install boto3
+        run: pip install boto3
+
+      - name: Upload avec Python Boto3
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.B2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
-          B2_BUCKET: ${{ secrets.B2_BUCKET_NAME }}
-          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT_URL }}
+          B2_KEY_ID: ${{ secrets.B2_ACCESS_KEY_ID }}
+          B2_APP_KEY: ${{ secrets.B2_SECRET_ACCESS_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT_URL: ${{ secrets.B2_ENDPOINT_URL }}
+          B2_REGION_NAME: ${{ secrets.B2_REGION }}
         run: |
-          echo "Début de l'upload vers le bucket $B2_BUCKET..."
-          # Envoie tout le contenu du dossier "packs" vers le dossier "packs" du bucket
-          aws s3 sync ./packs s3://$B2_BUCKET/packs --endpoint-url $B2_ENDPOINT
-          echo "✅ Upload terminé avec succès !"
+          python -c "
+          import os, boto3
+          from botocore.config import Config
+          
+          s3 = boto3.client(
+              's3',
+              endpoint_url=os.environ['B2_ENDPOINT_URL'],
+              region_name=os.environ['B2_REGION_NAME'],
+              aws_access_key_id=os.environ['B2_KEY_ID'],
+              aws_secret_access_key=os.environ['B2_APP_KEY'],
+              config=Config(signature_version='s3v4')
+          )
+          
+          bucket = os.environ['B2_BUCKET_NAME']
+          for root, dirs, files in os.walk('packs'):
+              for file in files:
+                  if file == '.gitkeep': continue
+                  file_path = os.path.join(root, file)
+                  s3_key = file_path
+                  print(f'Upload de {file_path} vers {s3_key}...')
+                  s3.upload_file(file_path, bucket, s3_key)
+          print('✅ Upload terminé avec succès !')
+          "
