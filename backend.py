@@ -52,7 +52,7 @@ s3_client = boto3.client(
 NOWPAYMENTS_API_KEY = os.environ.get("CRYPTO_API_KEY")
 NOWPAYMENTS_URL = "https://api.nowpayments.io/v1"
 
-print(f"🔑 Clé API NOWPayments présente : {bool(NOWPAYMENTS_API_KEY)}")
+print(f"🔑 Clé API NOWPayments présente : {bool(NOWPAYMENTS_API_KEY)} - Longueur: {len(NOWPAYMENTS_API_KEY) if NOWPAYMENTS_API_KEY else 0}")
 
 # --- OLLAMA ---
 OLLAMA_URL = "http://localhost:11434/api/generate"
