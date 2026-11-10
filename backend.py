@@ -52,6 +52,8 @@ s3_client = boto3.client(
 NOWPAYMENTS_API_KEY = os.environ.get("CRYPTO_API_KEY")
 NOWPAYMENTS_URL = "https://api.nowpayments.io/v1"
 
+print(f"🔑 Clé API NOWPayments présente : {bool(NOWPAYMENTS_API_KEY)}")
+
 # --- OLLAMA ---
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "phi3:mini"
@@ -67,7 +69,7 @@ class PaymentRequest(BaseModel):
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "model": MODEL_NAME, "firebase": db is not None, "storage": s3_client is not None}
+    return {"status": "ok", "model": MODEL_NAME, "firebase": db is not None, "storage": s3_client is not None, "nowpayments_key": bool(NOWPAYMENTS_API_KEY)}
 
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
@@ -87,40 +89,53 @@ def chat(request: ChatRequest):
 @app.post("/api/create-payment")
 def create_payment(req: PaymentRequest):
     if not NOWPAYMENTS_API_KEY:
+        print("❌ ERREUR : Clé API NOWPayments manquante.")
         raise HTTPException(status_code=500, detail="Clé API Crypto non configurée.")
     
     headers = {"x-api-key": NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
+    
+    # On force le prix à être un nombre flottant propre
+    price = round(float(req.price_usd), 2)
+    
     payload = {
-        "price_amount": req.price_usd,
+        "price_amount": price,
         "price_currency": "usd",
         "pay_currency": "usdttrc20",
         "order_id": f"GOANGEL_{int(time.time())}_{req.pack_name}",
         "order_description": f"Achat du pack {req.pack_name}"
     }
     
+    print(f"📤 Envoi à NOWPayments : {json.dumps(payload)}")
+    
     try:
-        res = requests.post(f"{NOWPAYMENTS_URL}/payment", json=payload, headers=headers)
+        res = requests.post(f"{NOWPAYMENTS_URL}/payment", json=payload, headers=headers, timeout=30)
+        print(f"📥 Réponse NOWPayments : {res.status_code} - {res.text}")
+        
         res.raise_for_status()
         data = res.json()
         
         if db:
             db.collection("orders").document(data["payment_id"]).set({
                 "pack_name": req.pack_name,
-                "price_usd": req.price_usd,
+                "price_usd": price,
                 "status": "waiting",
                 "pay_address": data["pay_address"],
                 "created_at": firestore.SERVER_TIMESTAMP
             })
             
         return {"payment_id": data["payment_id"], "pay_address": data["pay_address"], "amount": data["pay_amount"], "currency": data["pay_currency"]}
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ HTTP Error : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur NOWPayments : {res.text}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ Exception : {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne du serveur.")
 
 @app.get("/api/check-payment/{payment_id}")
 def check_payment(payment_id: str):
     headers = {"x-api-key": NOWPAYMENTS_API_KEY}
     try:
-        res = requests.get(f"{NOWPAYMENTS_URL}/payment/{payment_id}", headers=headers)
+        res = requests.get(f"{NOWPAYMENTS_URL}/payment/{payment_id}", headers=headers, timeout=30)
         res.raise_for_status()
         data = res.json()
         status = data["payment_status"]
