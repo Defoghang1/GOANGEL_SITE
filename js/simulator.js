@@ -29,7 +29,7 @@ const Simulator = (() => {
     const home = pick(teams); let away = pick(teams); while (away === home) away = pick(teams);
     const odds = +(1.5 + Math.random() * 1.9).toFixed(2), q = 1 / odds;
     const p = Math.min(.9, q + .03 + Math.random() * .09);                 // probabilité estimée par le modèle (avantage simulé)
-    const kelly = (p * odds - 1) / (odds - 1), stake = Math.max(500, Math.round(Math.min(.05, kelly * .25) * st.bank / 100) * 100);
+    const kelly = (p * odds - 1) / (odds - 1), stake = Math.max(5, Math.round(Math.min(.05, kelly * .25) * st.bank / 10) * 10);
     const win = Math.random() < p, gain = win ? Math.round(stake * (odds - 1)) : -stake;
     const before = st.bank; st.bank += gain; st.bets++; if (win) st.wins++; st.hist.push(st.bank);
     tween($("#s-bank"), before, st.bank); tween($("#s-pl"), st.last, st.bank - st.start, v => (v >= 0 ? "+" : "") + fmt(v)); st.last = st.bank - st.start;
@@ -38,14 +38,14 @@ const Simulator = (() => {
     const li = document.createElement("li"); li.className = win ? "win" : "loss";
     li.innerHTML = `<div><strong>${home} – ${away}</strong><span>${pick(markets)} · cote ${odds} · confiance ${Math.round(p * 100)} % · mise ${fmt(stake)}</span></div><b>${win ? "+" : "−"}${fmt(Math.abs(gain))}</b>`;
     const ul = $("#s-log"); ul.prepend(li); while (ul.children.length > 7) ul.lastChild.remove();
-    if (st.bank < 3000) reset(); chart();
+    if (st.bank < 30) reset(); chart();
   }
 
   function schedule() { clearInterval(timer); if (st.run) timer = setInterval(step, 2600 / st.speed); }
   function reset() { st.bank = st.start; st.hist = [st.start]; st.bets = 0; st.wins = 0; st.last = 0; $("#s-log").innerHTML = ""; $("#s-bank").textContent = fmt(st.bank); $("#s-pl").textContent = "+" + fmt(0); $("#s-rate").textContent = "–"; $("#s-n").textContent = 0; chart(); }
 
   function mount(el) {
-    if (!el) return; root = el; st = { start: 100000, bank: 100000, hist: [100000], bets: 0, wins: 0, last: 0, run: true, speed: 1 };
+    if (!el) return; root = el; st = { start: 1000, bank: 1000, hist: [1000], bets: 0, wins: 0, last: 0, run: true, speed: 1 };
     root.innerHTML = `
       <p class="sim-note">Démonstration : matchs et résultats fictifs. Elle illustre le fonctionnement d'une mise calibrée, pas des gains réels ni garantis.</p>
       <div class="sim-kpis">
