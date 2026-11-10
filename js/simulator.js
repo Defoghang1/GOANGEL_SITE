@@ -4,7 +4,7 @@ const Simulator = (() => {
   const $ = s => root.querySelector(s);
   const teams = ["Atlas FC", "Nordia United", "Real Solaris", "Olympia 04", "Vento Calcio", "Port Azur", "Dynamo Keld", "Sporting Aurea", "Lumen City", "Borea SC", "Tiber AC", "Kasai Stars"];
   const markets = ["Victoire domicile", "Victoire extérieur", "Plus de 2,5 buts", "Les deux marquent", "Nul ou domicile"];
-  const fmt = n => Math.round(n).toLocaleString("fr-FR") + " " + CONFIG.currency;
+  const fmt = n => (Math.round(n * 100) / 100).toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + CONFIG.currency;
   const pick = a => a[Math.random() * a.length | 0];
 
   function tween(el, from, to, f = fmt) {
@@ -30,9 +30,9 @@ const Simulator = (() => {
     const odds = +(1.5 + Math.random() * 1.9).toFixed(2), q = 1 / odds;
     const p = Math.min(.9, q + .03 + Math.random() * .09);                 // probabilité estimée par le modèle (avantage simulé)
     const kelly = (p * odds - 1) / (odds - 1), stake = Math.max(5, Math.round(Math.min(.05, kelly * .25) * st.bank / 10) * 10);
-    const win = Math.random() < p, gain = win ? Math.round(stake * (odds - 1)) : -stake;
-    const before = st.bank; st.bank += gain; st.bets++; if (win) st.wins++; st.hist.push(st.bank);
-    tween($("#s-bank"), before, st.bank); tween($("#s-pl"), st.last, st.bank - st.start, v => (v >= 0 ? "+" : "") + fmt(v)); st.last = st.bank - st.start;
+    const win = Math.random() < p, gain = win ? +(stake * (odds - 1)).toFixed(2) : -stake;
+    const before = st.bank; st.bank = Math.round((st.bank + gain) * 100) / 100; st.bets++; if (win) st.wins++; st.hist.push(st.bank);
+    tween($("#s-bank"), before, st.bank); const pl = Math.round((st.bank - st.start) * 100) / 100; tween($("#s-pl"), st.last, pl, v => (v >= 0 ? "+" : "") + fmt(v)); st.last = pl;
     $("#s-pl").className = st.last >= 0 ? "pos" : "neg";
     $("#s-rate").textContent = Math.round(st.wins / st.bets * 100) + " %"; $("#s-n").textContent = st.bets;
     const li = document.createElement("li"); li.className = win ? "win" : "loss";

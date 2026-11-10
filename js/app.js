@@ -131,11 +131,11 @@ async function initiatePayment(packName, btn) {
 
 async function downloadOrder(paymentId) {
   try {
-    const r = await api("/api/download/" + encodeURIComponent(paymentId));
-    if (r.download_url) window.location.href = r.download_url; else throw new Error("Lien indisponible.");
+    const r = await api("/api/download-token/" + encodeURIComponent(paymentId), { method: "POST" });
+    if (!r.url) throw new Error("Lien indisponible.");
+    window.location.href = API + r.url;   // le serveur envoie le ZIP en flux (lien signé valable 2 min)
   } catch (e) { alert("Téléchargement impossible : " + e.message); }
 }
-
 
 function confirmBox(title, html, okLabel) {
   return new Promise(resolve => {

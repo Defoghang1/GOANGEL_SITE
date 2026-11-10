@@ -1,51 +1,109 @@
-name: Upload Packs to Backblaze B2
+name: Upload Packs to Google Drive
 
+# Envoie le contenu du dossier ./packs (fichiers .zip) vers gdrive:goangel_packs
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branche ou tag contenant le dossier packs/ (vide = branche courante)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goangel-upload-packs
+  cancel-in-progress: false
 
 jobs:
   upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          ref: ${{ inputs.source_ref || github.ref }}
 
-      - name: Install boto3
-        run: pip install boto3
-
-      - name: Upload avec Python Boto3
-        env:
-          B2_KEY_ID: ${{ secrets.B2_ACCESS_KEY_ID }}
-          B2_APP_KEY: ${{ secrets.B2_SECRET_ACCESS_KEY }}
-          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-          B2_ENDPOINT_URL: ${{ secrets.B2_ENDPOINT_URL }}
-          B2_REGION_NAME: ${{ secrets.B2_REGION }}
+      - name: Installer rclone
         run: |
-          python -c "
-          import os, boto3
-          from botocore.config import Config
-          
-          s3 = boto3.client(
-              's3',
-              endpoint_url=os.environ['B2_ENDPOINT_URL'],
-              region_name=os.environ['B2_REGION_NAME'],
-              aws_access_key_id=os.environ['B2_KEY_ID'],
-              aws_secret_access_key=os.environ['B2_APP_KEY'],
-              config=Config(signature_version='s3v4')
-          )
-          
-          bucket = os.environ['B2_BUCKET_NAME']
-          for root, dirs, files in os.walk('packs'):
-              for file in files:
-                  if file == '.gitkeep': continue
-                  file_path = os.path.join(root, file)
-                  s3_key = file_path
-                  print(f'Upload de {file_path} vers {s3_key}...')
-                  s3.upload_file(file_path, bucket, s3_key)
-          print('✅ Upload terminé avec succès !')
-          "
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version | head -n 1
+
+      - name: Restaurer la configuration rclone (secret RCLONE_CONFIG en Base64)
+        env:
+          RCLONE_CONFIG_B64: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          if [ -z "$RCLONE_CONFIG_B64" ]; then
+            echo "::error::Le secret GitHub RCLONE_CONFIG est absent ou vide."
+            exit 1
+          fi
+          mkdir -p "$HOME/.config/rclone"
+          python3 - <<'PY'
+          import base64, os, sys
+          raw = os.environ["RCLONE_CONFIG_B64"].strip()
+          try:
+              if raw.startswith("["):
+                  data = raw.encode()
+              else:
+                  compact = "".join(raw.split())
+                  compact += "=" * (-len(compact) % 4)
+                  data = base64.b64decode(compact)
+              text = data.decode("utf-8")
+          except Exception:
+              print("::error::RCLONE_CONFIG n'est pas un Base64 valide.")
+              sys.exit(1)
+          if "[gdrive]" not in text:
+              print("::error::La configuration rclone ne contient pas de remote nommé [gdrive].")
+              sys.exit(1)
+          path = os.path.expanduser("~/.config/rclone/rclone.conf")
+          fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+          with os.fdopen(fd, "w") as f:
+              f.write(text)
+          print("Configuration rclone restaurée (remote gdrive présent).")
+          PY
+
+      - name: Vérifier l'accès à Google Drive
+        run: |
+          rclone lsd gdrive: --max-depth 0 || { echo "::error::Connexion à Google Drive impossible : jeton OAuth expiré ou configuration invalide (voir README)."; exit 1; }
+
+      - name: Créer le dossier distant si nécessaire
+        run: rclone mkdir gdrive:goangel_packs
+
+      - name: Vérifier le contenu de ./packs
+        run: |
+          if [ ! -d ./packs ]; then
+            echo "::error::Le dossier ./packs n'existe pas dans le dépôt (ref : ${{ inputs.source_ref || github.ref }})."
+            exit 1
+          fi
+          shopt -s nullglob
+          FILES=(./packs/*.zip)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::Aucun fichier .zip dans ./packs."
+            exit 1
+          fi
+          BAD=0
+          for f in "${FILES[@]}"; do
+            n=$(basename "$f")
+            if ! [[ "$n" =~ ^[a-z0-9][a-z0-9-]*\.zip$ ]]; then
+              echo "::error::Nom invalide : $n (minuscules, chiffres et tirets uniquement, ex. starter.zip)"
+              BAD=1
+            fi
+          done
+          [ "$BAD" -eq 0 ] || exit 1
+          ls -lh ./packs
+
+      - name: Transférer ./packs vers gdrive:goangel_packs
+        run: |
+          rclone copy ./packs gdrive:goangel_packs \
+            --include "*.zip" --checksum --transfers 2 \
+            --drive-chunk-size 64M -v --stats 15s --stats-one-line
+
+      - name: Contenu final du dossier distant
+        run: rclone lsl gdrive:goangel_packs
+
+      - name: Supprimer la configuration rclone du runner
+        if: always()
+        run: rm -f "$HOME/.config/rclone/rclone.conf"

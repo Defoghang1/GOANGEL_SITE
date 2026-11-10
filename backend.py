@@ -2,18 +2,26 @@ import os
 import re
 import json
 import time
+import glob
 import base64
+import hmac
+import hashlib
+import secrets
+import shutil
+import tempfile
+import threading
+import subprocess
 from collections import defaultdict, deque
 from typing import Optional
 
 import requests
-import boto3
 import firebase_admin
 from firebase_admin import credentials, firestore, auth as fb_auth
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
-from botocore.config import Config
 
 # ⚠️ Ne JAMAIS ajouter app.mount("/", StaticFiles(...)) : l'API ne sert que des routes /api/*.
 app = FastAPI(title="GOANGEL Server", docs_url=None, redoc_url=None)
@@ -26,39 +34,77 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- FIREBASE (Firestore + vérification des jetons) ---
-db = None
-try:
-    firebase_cred_b64 = os.environ.get("FIREBASE_CREDENTIALS")
-    if firebase_cred_b64:
-        firebase_admin.initialize_app(credentials.Certificate(json.loads(base64.b64decode(firebase_cred_b64))))
-        db = firestore.client()
-    else:
-        print("⚠️ FIREBASE_CREDENTIALS non configuré.")
-except Exception as e:
-    print(f"❌ Initialisation Firebase impossible : {e}")
-    db = None
+def _decode_secret(raw: str) -> bytes:
+    """Décode un secret Base64 (espaces/retours à la ligne et '=' manquants tolérés).
+    Un contenu déjà en clair (JSON ou fichier rclone) est accepté tel quel."""
+    raw = raw.strip()
+    if raw.startswith(("{", "[")):
+        return raw.encode("utf-8")
+    compact = "".join(raw.split())
+    compact += "=" * (-len(compact) % 4)
+    try:
+        return base64.b64decode(compact, validate=True)
+    except Exception:
+        return base64.urlsafe_b64decode(compact)
 
-# --- BACKBLAZE B2 ---
-B2_BUCKET = os.environ.get("B2_BUCKET_NAME")
-s3_client = None
-try:
-    if os.environ.get("B2_ACCESS_KEY_ID") and os.environ.get("B2_ENDPOINT_URL"):
-        s3_client = boto3.client(
-            "s3",
-            endpoint_url=os.environ.get("B2_ENDPOINT_URL"),
-            region_name=os.environ.get("B2_REGION"),
-            aws_access_key_id=os.environ.get("B2_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("B2_SECRET_ACCESS_KEY"),
-            config=Config(signature_version="s3v4"),
-        )
-except Exception as e:
-    print(f"❌ Initialisation B2 impossible : {e}")
+
+# --- FIREBASE (Firestore + vérification des jetons) ---
+def init_firebase():
+    raw = os.environ.get("FIREBASE_CREDENTIALS")
+    if not raw:
+        print("⚠️ FIREBASE_CREDENTIALS absent.")
+        return None
+    try:
+        info = json.loads(_decode_secret(raw))
+        missing = [k for k in ("project_id", "private_key", "client_email") if not info.get(k)]
+        if missing:
+            print(f"❌ FIREBASE_CREDENTIALS : champs manquants {missing}")
+            return None
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(credentials.Certificate(info))
+        return firestore.client()
+    except Exception as e:  # on ne journalise jamais le contenu du secret
+        print(f"❌ FIREBASE_CREDENTIALS invalide ({type(e).__name__}) : Base64 d'un fichier JSON de compte de service attendu.")
+        return None
+
+
+db = init_firebase()
+
+# --- GOOGLE DRIVE via rclone (remote « gdrive », dossier goangel_packs) ---
+RCLONE_REMOTE = "gdrive:goangel_packs"
+RCLONE_CONF_PATH = None
+
+
+def init_rclone():
+    if not shutil.which("rclone"):
+        print("⚠️ rclone introuvable dans le PATH.")
+        return None
+    raw = os.environ.get("RCLONE_CONFIG")
+    if not raw:
+        print("⚠️ RCLONE_CONFIG absent.")
+        return None
+    try:
+        conf = _decode_secret(raw).decode("utf-8")
+        if "[gdrive]" not in conf:
+            print("❌ RCLONE_CONFIG : section [gdrive] absente.")
+            return None
+        folder = tempfile.mkdtemp(prefix="goangel_rclone_")
+        path = os.path.join(folder, "rclone.conf")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(conf)
+        return path
+    except Exception as e:
+        print(f"❌ RCLONE_CONFIG invalide ({type(e).__name__}).")
+        return None
+
+
+RCLONE_CONF_PATH = init_rclone()
 
 # --- NOWPAYMENTS ---
 NOWPAYMENTS_API_KEY = os.environ.get("CRYPTO_API_KEY")
 NOWPAYMENTS_URL = "https://api.nowpayments.io/v1"
-print(f"🔑 NOWPayments: {bool(NOWPAYMENTS_API_KEY)} | Firebase: {db is not None} | B2: {s3_client is not None}")
+print(f"🔑 NOWPayments: {bool(NOWPAYMENTS_API_KEY)} | Firebase: {db is not None} | Google Drive (rclone): {RCLONE_CONF_PATH is not None}")
 
 # --- PRIX CÔTÉ SERVEUR (USDT) : jamais pris dans la requête du navigateur ---
 DEFAULT_PRICES = {"starter": 40.0, "pro": 120.0, "elite": 250.0}
@@ -134,7 +180,18 @@ def current_uid(authorization: Optional[str]) -> str:
         raise HTTPException(status_code=401, detail="Session invalide, reconnectez-vous.")
 
 
+PAYMENT_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
+SAFE_PACK_FILE = re.compile(r"^[a-z0-9][a-z0-9-]{0,59}\.zip$")
+
+
+def check_payment_id(payment_id: str) -> str:
+    if not PAYMENT_ID_RE.match(str(payment_id)):
+        raise HTTPException(status_code=400, detail="Identifiant de commande invalide.")
+    return str(payment_id)
+
+
 def get_order(payment_id: str, uid: str) -> dict:
+    check_payment_id(payment_id)
     snap = db.collection("orders").document(str(payment_id)).get()
     order = snap.to_dict() if snap.exists else None
     if not order or order.get("uid") != uid:
@@ -162,7 +219,7 @@ def rate_limited(ip: str, limit: int = 12, window: int = 60) -> bool:
 def health_check():
     return {
         "status": "ok", "model": MODEL_NAME,
-        "firebase": db is not None, "storage": s3_client is not None,
+        "firebase": db is not None, "storage": RCLONE_CONF_PATH is not None,
         "nowpayments_key": bool(NOWPAYMENTS_API_KEY),
     }
 
@@ -300,24 +357,144 @@ def delete_order(payment_id: str, authorization: Optional[str] = Header(None)):
     return {"deleted": True}
 
 
-@app.get("/api/download/{payment_id}")
-def download_file(payment_id: str, authorization: Optional[str] = Header(None)):
-    uid = current_uid(authorization)
-    if s3_client is None:
-        raise HTTPException(status_code=503, detail="Stockage non configuré côté serveur (secrets B2_*).")
-    order = get_order(payment_id, uid)
+# ---------- Téléchargement des packs (Google Drive via rclone) ----------
+DL_SECRET = secrets.token_bytes(32)   # propre au processus : les liens expirent aussi au redémarrage
+DL_TTL = 120                          # secondes de validité d'un lien de téléchargement
+MAX_DOWNLOADS = 3                     # téléchargements simultanés maximum (espace disque / RAM du runner)
+DL_STALE = 1800                       # un téléchargement « fantôme » est purgé après 30 min
+_dl_lock = threading.Lock()
+_dl_active = {}                       # dossier temporaire -> heure de début
+
+# Nettoyage des dossiers temporaires laissés par un ancien processus
+for _d in glob.glob(os.path.join(tempfile.gettempdir(), "goangel_dl_*")):
+    shutil.rmtree(_d, ignore_errors=True)
+
+
+def run_rclone(args, timeout):
+    env = {k: v for k, v in os.environ.items() if k != "RCLONE_CONFIG"}  # rclone lirait ce nom comme un CHEMIN de fichier
+    return subprocess.run(
+        ["rclone", "--config", RCLONE_CONF_PATH, "--retries", "3", *args],
+        capture_output=True, text=True, timeout=timeout, env=env,
+    )
+
+
+def ensure_drive_ready():
+    if RCLONE_CONF_PATH is None:
+        raise HTTPException(status_code=503, detail="Stockage Google Drive non configuré côté serveur (secret RCLONE_CONFIG).")
+
+
+def list_pack_files() -> set:
+    try:
+        res = run_rclone(["lsf", RCLONE_REMOTE, "--files-only"], timeout=60)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Google Drive met trop de temps à répondre, réessayez.")
+    if res.returncode != 0:
+        print(f"❌ rclone lsf : {res.stderr[:200]}")
+        raise HTTPException(status_code=502, detail="Google Drive inaccessible pour le moment, réessayez.")
+    return {line.strip() for line in res.stdout.splitlines() if line.strip()}
+
+
+def pack_filename(pack_name: str) -> str:
+    name = f"{slug(pack_name)}.zip"
+    if not SAFE_PACK_FILE.match(name):
+        raise HTTPException(status_code=400, detail="Nom de pack invalide.")
+    return name
+
+
+def make_dl_token(payment_id: str, uid: str) -> str:
+    exp = int(time.time()) + DL_TTL
+    sig = hmac.new(DL_SECRET, f"{payment_id}.{uid}.{exp}".encode(), hashlib.sha256).hexdigest()
+    return f"{exp}.{sig}"
+
+
+def check_dl_token(token: str, payment_id: str, uid: str) -> bool:
+    try:
+        exp_s, sig = token.split(".", 1)
+        if int(exp_s) < time.time():
+            return False
+        expected = hmac.new(DL_SECRET, f"{payment_id}.{uid}.{exp_s}".encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig, expected)
+    except Exception:
+        return False
+
+
+def authorize_download(payment_id: str, token: Optional[str], authorization: Optional[str]) -> dict:
+    """Commande existante + payée + propriétaire (jeton Firebase OU lien signé court)."""
+    check_payment_id(payment_id)
+    if db is None:
+        raise HTTPException(status_code=503, detail="Base de données non configurée côté serveur (secret FIREBASE_CREDENTIALS).")
+    if token:
+        snap = db.collection("orders").document(payment_id).get()
+        order = snap.to_dict() if snap.exists else None
+        if not order:
+            raise HTTPException(status_code=404, detail="Commande introuvable.")
+        if not check_dl_token(token, payment_id, str(order.get("uid", ""))):
+            raise HTTPException(status_code=403, detail="Lien de téléchargement expiré ou invalide : relancez le téléchargement depuis le site.")
+    else:
+        order = get_order(payment_id, current_uid(authorization))
     if order.get("status") != "paid":
         raise HTTPException(status_code=403, detail="Paiement non validé.")
-    file_key = f"packs/{slug(order['pack_name'])}.zip"
+    return order
+
+
+def _reserve_slot() -> Optional[str]:
+    with _dl_lock:
+        now = time.time()
+        for d, t in list(_dl_active.items()):
+            if now - t > DL_STALE:
+                shutil.rmtree(d, ignore_errors=True)
+                _dl_active.pop(d, None)
+        if len(_dl_active) >= MAX_DOWNLOADS:
+            return None
+        folder = tempfile.mkdtemp(prefix="goangel_dl_")   # dossier unique par téléchargement : aucun conflit
+        _dl_active[folder] = now
+        return folder
+
+
+def _release_slot(folder: str):
+    with _dl_lock:
+        _dl_active.pop(folder, None)
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+@app.post("/api/download-token/{payment_id}")
+def download_token(payment_id: str, authorization: Optional[str] = Header(None)):
+    """Vérifie l'achat et le fichier, puis renvoie un lien signé de 2 min (le navigateur ne peut pas envoyer d'en-tête Authorization en naviguant)."""
+    order = authorize_download(payment_id, None, authorization)
+    ensure_drive_ready()
+    filename = pack_filename(order["pack_name"])
+    if filename not in list_pack_files():
+        raise HTTPException(status_code=404, detail=f"Le fichier du pack « {order['pack_name']} » n'est pas encore disponible : contactez le support.")
+    return {"url": f"/api/download/{payment_id}?token={make_dl_token(payment_id, str(order.get('uid', '')))}"}
+
+
+@app.get("/api/download/{payment_id}")
+def download_file(payment_id: str, token: Optional[str] = Query(None, max_length=200), authorization: Optional[str] = Header(None)):
+    order = authorize_download(payment_id, token, authorization)
+    ensure_drive_ready()
+    filename = pack_filename(order["pack_name"])
+
+    folder = _reserve_slot()
+    if folder is None:
+        raise HTTPException(status_code=429, detail="Serveur occupé par d'autres téléchargements, réessayez dans un instant.")
     try:
-        s3_client.head_object(Bucket=B2_BUCKET, Key=file_key)
-    except Exception:
-        raise HTTPException(status_code=404, detail=f"Fichier {file_key} introuvable sur le stockage.")
-    try:
-        url = s3_client.generate_presigned_url("get_object", Params={"Bucket": B2_BUCKET, "Key": file_key}, ExpiresIn=300)
-        return {"download_url": url}
-    except Exception:
-        raise HTTPException(status_code=500, detail="Erreur génération du lien.")
+        if filename not in list_pack_files():
+            raise HTTPException(status_code=404, detail="Fichier du pack introuvable sur le stockage.")
+        dest = os.path.join(folder, filename)
+        try:
+            res = run_rclone(["copyto", f"{RCLONE_REMOTE}/{filename}", dest], timeout=900)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="Téléchargement depuis Google Drive trop long, réessayez.")
+        if res.returncode != 0 or not os.path.isfile(dest):
+            print(f"❌ rclone copyto : {res.stderr[:200]}")
+            raise HTTPException(status_code=502, detail="Impossible de récupérer le fichier depuis Google Drive.")
+    except BaseException:
+        _release_slot(folder)
+        raise
+    return FileResponse(
+        dest, media_type="application/zip", filename=f"goangel-{filename}",
+        background=BackgroundTask(_release_slot, folder),   # supprime le fichier temporaire après l'envoi
+    )
 
 
 if __name__ == "__main__":
