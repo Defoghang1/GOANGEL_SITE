@@ -71,7 +71,7 @@ def init_firebase():
 db = init_firebase()
 
 # --- GOOGLE DRIVE via rclone (remote « gdrive », dossier goangel_packs) ---
-RCLONE_REMOTE = "gdrive:goangel_packs"
+RCLONE_REMOTE = "gdrive_wadoum:goangel_packs"
 RCLONE_CONF_PATH = None
 
 
