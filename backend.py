@@ -12,6 +12,7 @@ import tempfile
 import threading
 import subprocess
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
@@ -71,7 +72,7 @@ def init_firebase():
 db = init_firebase()
 
 # --- GOOGLE DRIVE via rclone (remote « gdrive », dossier goangel_packs) ---
-RCLONE_REMOTE = "gdrive_wadoum:goangel_packs"
+RCLONE_REMOTE = "gdrive:goangel_packs"
 RCLONE_CONF_PATH = None
 
 
@@ -130,7 +131,9 @@ class ChatResponse(BaseModel):
 
 
 class PaymentRequest(BaseModel):
-    pack_name: str = Field(..., min_length=1, max_length=60)
+    product_id: Optional[str] = Field(None, max_length=60)
+    pack_name: Optional[str] = Field(None, max_length=60)      # ancien nom du champ, toujours accepté
+    promo_code: Optional[str] = Field(None, max_length=40)
 
 
 # ---------- Utilitaires (testables) ----------
@@ -150,25 +153,6 @@ def map_status(raw: str) -> str:
     return "waiting"
 
 
-def resolve_pack(pack_name: str):
-    """Retourne (nom_canonique, prix_usd) ou None. Firestore (admin) prioritaire, sinon prix par défaut."""
-    key = pack_name.strip().lower()
-    if db is not None:
-        try:
-            for d in db.collection("packs").stream():
-                data = d.to_dict() or {}
-                if str(data.get("name", "")).strip().lower() == key:
-                    price = float(data.get("price", 0))
-                    if 0 < price <= MAX_PRICE_USD:
-                        return str(data["name"]).strip(), price
-                    print(f"⚠️ Prix Firestore invalide pour {key} ({price}) : prix par défaut utilisé.")
-        except Exception as e:
-            print(f"⚠️ Lecture des packs Firestore impossible : {e}")
-    if key in DEFAULT_PRICES:
-        return key.capitalize(), DEFAULT_PRICES[key]
-    return None
-
-
 def current_uid(authorization: Optional[str]) -> str:
     if db is None:
         raise HTTPException(status_code=503, detail="Base de données non configurée côté serveur (secret FIREBASE_CREDENTIALS).")
@@ -181,7 +165,6 @@ def current_uid(authorization: Optional[str]) -> str:
 
 
 PAYMENT_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
-SAFE_PACK_FILE = re.compile(r"^[a-z0-9][a-z0-9-]{0,59}\.zip$")
 
 
 def check_payment_id(payment_id: str) -> str:
@@ -214,6 +197,334 @@ def rate_limited(ip: str, limit: int = 12, window: int = 60) -> bool:
     return False
 
 
+# ---------- Catalogue : Google Drive = source de vérité de la DISPONIBILITÉ ----------
+CATALOG_FILE = os.environ.get("CATALOG_FILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalog.json")
+CATALOG_REFRESH_SECONDS = max(30, int(os.environ.get("CATALOG_REFRESH_SECONDS", "300")))
+RECENT_DAYS = 14
+OUT_OF_STOCK_MESSAGE = ("Ce logiciel est actuellement épuisé. Nous préparons l'arrivée de nouvelles marques ou versions. "
+                        "Merci de patienter, le produit sera de nouveau disponible dès son réapprovisionnement.")
+UNKNOWN_MESSAGE = "La disponibilité de ce logiciel est en cours de vérification (Google Drive injoignable). Réessayez dans un instant."
+# <id>.zip ou <id>-vX.Y.Z.zip (en minuscules pour la comparaison)
+FILE_NAME_RE = re.compile(r"^(?P<id>[a-z0-9]+(?:-[a-z0-9]+)*?)(?:[-_]v(?P<ver>\d+(?:\.\d+){0,3}))?\.zip$")
+SAFE_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,100}\.zip$")
+LIST_FIELDS = ("features", "benefits", "technologies", "included_files", "requirements", "compatibility", "usage")
+TEXT_FIELDS = ("tagline", "description", "long_description", "updates", "delivery", "icon")
+PUBLIC_KEYS = ("id", "name", "tagline", "description", "long_description", "features", "benefits", "technologies",
+               "included_files", "requirements", "compatibility", "usage", "updates", "delivery", "icon", "image_url",
+               "featured", "order")
+
+
+class DriveError(Exception):
+    pass
+
+
+def _as_list(v):
+    if isinstance(v, str):
+        v = v.splitlines()
+    if not isinstance(v, (list, tuple)):
+        return []
+    return [str(x).strip()[:300] for x in v if str(x).strip()][:30]
+
+
+def normalize_product(raw: dict) -> Optional[dict]:
+    """Nettoie une définition de produit (catalog.json ou Firestore) ; ne garde que des champs connus."""
+    name = str(raw.get("name") or "").strip()[:60]
+    pid = slug(raw.get("id") or name)
+    if not name or not pid:
+        return None
+    p = {"id": pid, "name": name}
+    try:
+        price = float(raw.get("price_usdt", raw.get("price")))
+        if 0 < price <= MAX_PRICE_USD:
+            p["price_usdt"] = round(price, 2)
+        else:
+            print(f"⚠️ Prix hors limites ignoré pour « {pid} ».")
+    except (TypeError, ValueError):
+        pass
+    for k in LIST_FIELDS:
+        lst = _as_list(raw.get(k))
+        if lst:
+            p[k] = lst
+    for k in TEXT_FIELDS:
+        if raw.get(k):
+            p[k] = str(raw[k]).strip()[:4000]
+    if str(raw.get("image_url") or "").startswith("https://"):
+        p["image_url"] = str(raw["image_url"]).strip()[:500]
+    for k in ("version", "pinned_version"):
+        if raw.get(k):
+            p[k] = str(raw[k]).strip()[:20]
+    if "featured" in raw:
+        p["featured"] = bool(raw["featured"])
+    try:
+        p["order"] = int(raw["order"])
+    except (KeyError, TypeError, ValueError):
+        pass
+    if raw.get("hidden"):
+        p["hidden"] = True
+    return p
+
+
+def load_base_catalog() -> dict:
+    try:
+        with open(CATALOG_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        prods = [normalize_product(x) for x in data.get("products", []) if isinstance(x, dict)]
+        return {"promo": data.get("promo") or {}, "products": [p for p in prods if p]}
+    except Exception as e:
+        print(f"⚠️ catalog.json illisible ({type(e).__name__}) : catalogue minimal utilisé.")
+        mini = [normalize_product({"name": n.capitalize(), "price_usdt": v, "order": i}) for i, (n, v) in enumerate(DEFAULT_PRICES.items())]
+        return {"promo": {}, "products": mini}
+
+
+def load_overrides():
+    """Produits saisis dans l'admin (Firestore « packs ») ; None si Firestore est indisponible."""
+    if db is None:
+        return None
+    out = []
+    for d in db.collection("packs").stream():
+        n = normalize_product(d.to_dict() or {})
+        if n:
+            out.append(n)
+    return out
+
+
+def merge_products(base, overrides) -> list:
+    prods = {p["id"]: dict(p) for p in base}
+    for o in overrides or []:
+        prods[o["id"]] = {**prods.get(o["id"], {}), **o}
+    out = [p for p in prods.values() if p.get("price_usdt") and not p.get("hidden")]
+    out.sort(key=lambda p: (p.get("order", 999), p["price_usdt"], p["name"]))
+    return out
+
+
+def vtuple(v) -> tuple:
+    nums = [int(x) for x in re.findall(r"\d+", str(v))[:4]] or [0]
+    return tuple(nums + [0] * (4 - len(nums)))
+
+
+def pick_file(product: dict, files: dict):
+    """Règle de version : version épinglée si son fichier existe ; sinon la plus haute parmi <id>-vX.Y.Z.zip et
+    <id>.zip (qui compte comme la version déclarée au catalogue) ; égalité = fichier versionné. Retourne (info, version) ou None."""
+    pid = product["id"]
+    versioned, unversioned = [], None
+    for low, info in files.items():
+        m = FILE_NAME_RE.match(low)
+        if not m or m.group("id") != pid:
+            continue
+        if m.group("ver"):
+            versioned.append((vtuple(m.group("ver")), m.group("ver"), info))
+        else:
+            unversioned = info
+    if not versioned and unversioned is None:
+        return None
+    pinned = product.get("pinned_version")
+    if pinned:
+        for t, v, info in versioned:
+            if t == vtuple(pinned):
+                return info, v
+    best = max(versioned, key=lambda x: x[0]) if versioned else None
+    declared = str(product.get("version") or "1.0.0")
+    if unversioned is not None and (best is None or vtuple(declared) > best[0]):
+        return unversioned, declared
+    return best[2], best[1]
+
+
+def _parse_iso(s):
+    try:
+        s = re.sub(r"(\.\d{6})\d+", r"\1", str(s)).replace("Z", "+00:00")
+        d = datetime.fromisoformat(s)
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def fetch_drive_files() -> dict:
+    """Liste réelle des ZIP présents sur Drive (UN appel rclone lsjson, aucun téléchargement)."""
+    if RCLONE_CONF_PATH is None:
+        raise DriveError("Stockage Google Drive non configuré côté serveur (secret RCLONE_CONFIG).")
+    try:
+        res = run_rclone(["lsjson", RCLONE_REMOTE, "--files-only"], timeout=60)
+    except subprocess.TimeoutExpired:
+        raise DriveError("Google Drive met trop de temps à répondre.")
+    if res.returncode != 0:
+        print(f"❌ rclone lsjson : {res.stderr[:200]}")
+        raise DriveError("Google Drive inaccessible pour le moment.")
+    try:
+        items = json.loads(res.stdout or "[]")
+    except ValueError:
+        raise DriveError("Réponse Google Drive illisible.")
+    files = {}
+    for it in items:
+        name = str(it.get("Name", ""))
+        if it.get("IsDir") or not SAFE_FILE_NAME.match(name) or ".." in name:
+            continue
+        files[name.lower()] = {"name": name, "size": int(it.get("Size") or 0), "modified": str(it.get("ModTime") or "")}
+    return files
+
+
+def drive_files_or_http() -> dict:
+    try:
+        return fetch_drive_files()
+    except DriveError as e:
+        raise HTTPException(status_code=503 if RCLONE_CONF_PATH is None else 502, detail=str(e))
+
+
+def _files_of(pid: str, files: dict) -> list:
+    out = []
+    for low, i in files.items():
+        m = FILE_NAME_RE.match(low)
+        if m and m.group("id") == pid:
+            out.append(i["name"])
+    return out
+
+
+def build_snapshot(products, files, drive_state, error, promo_cfg) -> dict:
+    now = datetime.now(timezone.utc)
+    items, used = [], set()
+    for p in products:
+        it = dict(p)
+        declared = str(p.get("version") or "1.0.0")
+        if files is None:
+            it.update(state="unknown", file=None, sold_version=declared, archived=[], recent=False)
+        else:
+            sel = pick_file(p, files)
+            others = _files_of(p["id"], files)
+            if sel is None:
+                it.update(state="unavailable", file=None, sold_version=declared, archived=[], recent=False)
+            else:
+                info, ver = sel
+                mod = _parse_iso(info["modified"])
+                it.update(state="available", sold_version=ver,
+                          file={"name": info["name"], "size": info["size"], "updated_at": mod.isoformat() if mod else info["modified"]},
+                          archived=[n for n in others if n != info["name"]],
+                          recent=bool(mod and (now - mod).days <= RECENT_DAYS))
+            used.update(n.lower() for n in others)
+        items.append(it)
+    unlisted = sorted(i["name"] for low, i in (files or {}).items() if low not in used)
+    return {"items": items, "unlisted": unlisted, "drive": drive_state, "error": error, "promo": promo_cfg or {},
+            "synced_at": now.isoformat(), "ts": time.time()}
+
+
+_snapshot = {"items": [], "unlisted": [], "drive": "unknown", "error": None, "promo": {}, "synced_at": None, "ts": 0}
+_last_overrides = []
+_refresh_lock = threading.Lock()
+
+
+def _log_changes(old, new):
+    prev = {i["id"]: i for i in old["items"]}
+    for i in new["items"]:
+        o = prev.get(i["id"])
+        if o is None:
+            if old["ts"]:
+                print(f"🆕 Produit ajouté au catalogue : {i['id']}")
+        elif o["state"] != i["state"]:
+            print(f"🔄 {i['id']} : {o['state']} → {i['state']}")
+        elif o.get("sold_version") != i.get("sold_version"):
+            print(f"🔄 {i['id']} : version {o.get('sold_version')} → {i.get('sold_version')}")
+    for pid in prev:
+        if pid not in {i['id'] for i in new["items"]}:
+            print(f"➖ Produit retiré du catalogue : {pid}")
+
+
+def refresh_catalog() -> dict:
+    """Relit catalog.json, les produits Firestore et la liste réelle des ZIP sur Drive."""
+    global _snapshot, _last_overrides
+    with _refresh_lock:
+        base = load_base_catalog()
+        try:
+            ov = load_overrides()
+            if ov is not None:
+                _last_overrides = ov
+        except Exception as e:
+            print(f"⚠️ Lecture des produits Firestore impossible ({type(e).__name__}) : dernière version connue conservée.")
+        products = merge_products(base["products"], _last_overrides)
+        try:
+            files, state, err = fetch_drive_files(), "ok", None
+        except DriveError as e:
+            files, state, err = None, ("unconfigured" if RCLONE_CONF_PATH is None else "error"), str(e)
+        snap = build_snapshot(products, files, state, err, base["promo"])
+        _log_changes(_snapshot, snap)
+        _snapshot = snap
+        return snap
+
+
+def get_snapshot() -> dict:
+    snap = _snapshot
+    if time.time() - snap["ts"] > CATALOG_REFRESH_SECONDS * 3 and not _refresh_lock.locked():
+        try:
+            return refresh_catalog()
+        except Exception:
+            pass
+    return snap
+
+
+def public_item(it: dict) -> dict:
+    out = {k: it[k] for k in PUBLIC_KEYS if k in it}
+    st = it["state"]
+    out.update(price_usdt=it["price_usdt"], version=it["sold_version"], state=st, available=(st == "available"),
+               file=it["file"], recently_updated=it["recent"],
+               message=OUT_OF_STOCK_MESSAGE if st == "unavailable" else (UNKNOWN_MESSAGE if st == "unknown" else ""))
+    return out
+
+
+def active_promo(cfg: dict) -> Optional[dict]:
+    """Promotion réellement utilisable (activée, code valide, non expirée) ou None."""
+    try:
+        if not cfg or not cfg.get("enabled"):
+            return None
+        code = str(cfg.get("code") or "").strip().upper()
+        pct = float(cfg.get("percent") or 0)
+        if not code or not (0 < pct < 100):
+            return None
+        exp = cfg.get("expires")
+        if exp:
+            d = _parse_iso(str(exp) + ("T23:59:59" if len(str(exp)) <= 10 else ""))
+            if d is None or d < datetime.now(timezone.utc):
+                return None
+        return {"code": code, "percent": pct, "pack_id": slug(cfg.get("pack") or "") or None,
+                "message": str(cfg.get("message") or f"-{pct:g}% avec le code {code}")[:200], "expires": exp or None}
+    except Exception:
+        return None
+
+
+def verified_product(product_id: str):
+    """Revérifie Drive AU MOMENT de l'achat : jamais de paiement pour un fichier absent ou invérifiable."""
+    snap = refresh_catalog()
+    item = next((i for i in snap["items"] if i["id"] == product_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Pack inconnu.")
+    if item["state"] == "unknown":
+        raise HTTPException(status_code=503, detail="Impossible de vérifier la disponibilité du logiciel (Google Drive injoignable). Aucun paiement n'a été créé, réessayez dans un instant.")
+    if item["state"] == "unavailable":
+        raise HTTPException(status_code=409, detail=OUT_OF_STOCK_MESSAGE)
+    return item, snap
+
+
+def admin_claims(authorization: Optional[str]) -> dict:
+    if db is None:
+        raise HTTPException(status_code=503, detail="Base de données non configurée côté serveur.")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Connexion requise.")
+    try:
+        claims = fb_auth.verify_id_token(authorization[7:])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Session invalide, reconnectez-vous.")
+    if claims.get("admin") is not True:
+        raise HTTPException(status_code=403, detail="Réservé à l'administrateur.")
+    return claims
+
+
+def admin_view(snap: dict) -> dict:
+    return {
+        "drive": snap["drive"], "error": snap["error"], "synced_at": snap["synced_at"],
+        "products": [{"id": i["id"], "name": i["name"], "price_usdt": i["price_usdt"], "state": i["state"],
+                      "version": i["sold_version"], "file": i["file"], "recently_updated": i["recent"],
+                      "archived": i["archived"]} for i in snap["items"]],
+        "unlisted": snap["unlisted"],
+        "naming": "<id>.zip ou <id>-vX.Y.Z.zip (ex. pro-v1.2.0.zip)",
+    }
+
+
 # ---------- Routes ----------
 @app.get("/api/health")
 def health_check():
@@ -221,6 +532,7 @@ def health_check():
         "status": "ok", "model": MODEL_NAME,
         "firebase": db is not None, "storage": RCLONE_CONF_PATH is not None,
         "nowpayments_key": bool(NOWPAYMENTS_API_KEY),
+        "catalog": {"drive": _snapshot["drive"], "products": len(_snapshot["items"]), "synced_at": _snapshot["synced_at"]},
     }
 
 
@@ -254,17 +566,29 @@ def create_payment(req: PaymentRequest, authorization: Optional[str] = Header(No
         print("❌ CRYPTO_API_KEY manquante (secret GitHub non transmis au backend ?).")
         raise HTTPException(status_code=503, detail="Paiement crypto non configuré côté serveur (secret CRYPTO_API_KEY).")
 
-    pack = resolve_pack(req.pack_name)
-    if not pack:
-        raise HTTPException(status_code=404, detail="Pack inconnu.")
-    pack_name, price = pack
+    product_id = slug(req.product_id or req.pack_name or "")
+    if not product_id:
+        raise HTTPException(status_code=400, detail="Produit manquant.")
+    item, snap = verified_product(product_id)        # revérifie Google Drive avant de créer le paiement
+    base_price = item["price_usdt"]
+    price, promo_code, percent = base_price, None, 0
+    if req.promo_code and req.promo_code.strip():
+        promo = active_promo(snap["promo"])
+        code = req.promo_code.strip().upper()
+        if not promo or code != promo["code"]:
+            raise HTTPException(status_code=400, detail="Code promo invalide ou expiré.")
+        if promo["pack_id"] and promo["pack_id"] != item["id"]:
+            raise HTTPException(status_code=400, detail="Ce code promo ne s'applique pas à ce pack.")
+        percent, promo_code = promo["percent"], promo["code"]
+        price = round(base_price * (1 - percent / 100), 2)
+    pack_name, version, file_name = item["name"], item["sold_version"], item["file"]["name"]
 
     payload = {
-        "price_amount": round(price, 2),
+        "price_amount": price,
         "price_currency": "usd",
         "pay_currency": "usdttrc20",
         "order_id": f"GOANGEL_{int(time.time())}_{slug(pack_name)}",
-        "order_description": f"Achat du pack {pack_name}",
+        "order_description": f"Achat du pack {pack_name} v{version}",
     }
     headers = {"x-api-key": NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
     try:
@@ -285,12 +609,14 @@ def create_payment(req: PaymentRequest, authorization: Optional[str] = Header(No
         data = res.json()
         payment_id = str(data["payment_id"])
         db.collection("orders").document(payment_id).set({
-            "uid": uid, "pack_name": pack_name, "price_usd": price, "status": "waiting",
+            "uid": uid, "product_id": item["id"], "pack_name": pack_name, "version": version, "file_name": file_name,
+            "price_usd": price, "base_price_usd": base_price, "promo_code": promo_code, "status": "waiting",
             "pay_address": data["pay_address"], "pay_amount": data["pay_amount"],
             "pay_currency": data["pay_currency"], "created_at": firestore.SERVER_TIMESTAMP,
         })
-        return {"payment_id": payment_id, "pack_name": pack_name, "pay_address": data["pay_address"],
-                "amount": data["pay_amount"], "currency": data["pay_currency"]}
+        return {"payment_id": payment_id, "pack_name": pack_name, "version": version, "pay_address": data["pay_address"],
+                "amount": data["pay_amount"], "currency": data["pay_currency"], "price": price,
+                "base_price": base_price, "promo_code": promo_code, "discount_percent": percent}
     except HTTPException:
         raise
     except Exception as e:
@@ -327,7 +653,7 @@ def my_orders(authorization: Optional[str] = Header(None)):
             continue
         ts = o.get("created_at")
         out.append({
-            "payment_id": d.id, "pack_name": o.get("pack_name"), "status": o.get("status", "waiting"),
+            "payment_id": d.id, "pack_name": o.get("pack_name"), "version": o.get("version"), "status": o.get("status", "waiting"),
             "pay_address": o.get("pay_address"), "pay_amount": o.get("pay_amount"), "pay_currency": o.get("pay_currency"),
             "created_at": ts.isoformat() if hasattr(ts, "isoformat") else None,
         })
@@ -381,24 +707,6 @@ def run_rclone(args, timeout):
 def ensure_drive_ready():
     if RCLONE_CONF_PATH is None:
         raise HTTPException(status_code=503, detail="Stockage Google Drive non configuré côté serveur (secret RCLONE_CONFIG).")
-
-
-def list_pack_files() -> set:
-    try:
-        res = run_rclone(["lsf", RCLONE_REMOTE, "--files-only"], timeout=60)
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Google Drive met trop de temps à répondre, réessayez.")
-    if res.returncode != 0:
-        print(f"❌ rclone lsf : {res.stderr[:200]}")
-        raise HTTPException(status_code=502, detail="Google Drive inaccessible pour le moment, réessayez.")
-    return {line.strip() for line in res.stdout.splitlines() if line.strip()}
-
-
-def pack_filename(pack_name: str) -> str:
-    name = f"{slug(pack_name)}.zip"
-    if not SAFE_PACK_FILE.match(name):
-        raise HTTPException(status_code=400, detail="Nom de pack invalide.")
-    return name
 
 
 def make_dl_token(payment_id: str, uid: str) -> str:
@@ -457,14 +765,27 @@ def _release_slot(folder: str):
     shutil.rmtree(folder, ignore_errors=True)
 
 
+def order_file_name(order: dict) -> str:
+    """Le fichier livré est TOUJOURS celui enregistré par le serveur à l'achat (jamais un paramètre du client).
+    Anciennes commandes sans file_name : <pack>.zip."""
+    name = str(order.get("file_name") or f"{slug(order.get('pack_name', ''))}.zip")
+    if not SAFE_FILE_NAME.match(name) or ".." in name:
+        raise HTTPException(status_code=400, detail="Nom de fichier de commande invalide.")
+    return name
+
+
+MISSING_FILE_MESSAGE = ("Le fichier de ce logiciel n'est plus disponible sur le stockage pour le moment. Votre commande est conservée : "
+                        "contactez le support avec votre ID de paiement.")
+
+
 @app.post("/api/download-token/{payment_id}")
 def download_token(payment_id: str, authorization: Optional[str] = Header(None)):
     """Vérifie l'achat et le fichier, puis renvoie un lien signé de 2 min (le navigateur ne peut pas envoyer d'en-tête Authorization en naviguant)."""
     order = authorize_download(payment_id, None, authorization)
     ensure_drive_ready()
-    filename = pack_filename(order["pack_name"])
-    if filename not in list_pack_files():
-        raise HTTPException(status_code=404, detail=f"Le fichier du pack « {order['pack_name']} » n'est pas encore disponible : contactez le support.")
+    filename = order_file_name(order)
+    if filename.lower() not in drive_files_or_http():
+        raise HTTPException(status_code=404, detail=MISSING_FILE_MESSAGE)
     return {"url": f"/api/download/{payment_id}?token={make_dl_token(payment_id, str(order.get('uid', '')))}"}
 
 
@@ -472,17 +793,18 @@ def download_token(payment_id: str, authorization: Optional[str] = Header(None))
 def download_file(payment_id: str, token: Optional[str] = Query(None, max_length=200), authorization: Optional[str] = Header(None)):
     order = authorize_download(payment_id, token, authorization)
     ensure_drive_ready()
-    filename = pack_filename(order["pack_name"])
+    filename = order_file_name(order)
 
     folder = _reserve_slot()
     if folder is None:
         raise HTTPException(status_code=429, detail="Serveur occupé par d'autres téléchargements, réessayez dans un instant.")
     try:
-        if filename not in list_pack_files():
-            raise HTTPException(status_code=404, detail="Fichier du pack introuvable sur le stockage.")
-        dest = os.path.join(folder, filename)
+        info = drive_files_or_http().get(filename.lower())      # revérification juste avant la livraison
+        if not info:
+            raise HTTPException(status_code=404, detail=MISSING_FILE_MESSAGE)
+        dest = os.path.join(folder, info["name"])
         try:
-            res = run_rclone(["copyto", f"{RCLONE_REMOTE}/{filename}", dest], timeout=900)
+            res = run_rclone(["copyto", f"{RCLONE_REMOTE}/{info['name']}", dest], timeout=900)
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="Téléchargement depuis Google Drive trop long, réessayez.")
         if res.returncode != 0 or not os.path.isfile(dest):
@@ -492,9 +814,48 @@ def download_file(payment_id: str, token: Optional[str] = Query(None, max_length
         _release_slot(folder)
         raise
     return FileResponse(
-        dest, media_type="application/zip", filename=f"goangel-{filename}",
+        dest, media_type="application/zip", filename=f"goangel-{info['name']}",
         background=BackgroundTask(_release_slot, folder),   # supprime le fichier temporaire après l'envoi
     )
+
+
+# ---------- Catalogue public (connecté) et administration ----------
+@app.get("/api/catalog")
+def catalog(http: Request, authorization: Optional[str] = Header(None)):
+    current_uid(authorization)
+    ip = http.headers.get("cf-connecting-ip") or (http.client.host if http.client else "?")
+    if rate_limited("cat:" + ip, limit=60):
+        raise HTTPException(status_code=429, detail="Trop de requêtes, patientez un instant.")
+    snap = get_snapshot()
+    return {"products": [public_item(i) for i in snap["items"]], "promo": active_promo(snap["promo"]),
+            "drive": snap["drive"], "synced_at": snap["synced_at"], "refresh_seconds": CATALOG_REFRESH_SECONDS}
+
+
+@app.get("/api/admin/catalog")
+def admin_catalog(authorization: Optional[str] = Header(None)):
+    admin_claims(authorization)
+    return admin_view(get_snapshot())
+
+
+@app.post("/api/admin/sync")
+def admin_sync(authorization: Optional[str] = Header(None)):
+    """Synchronisation à la demande : relit Drive, catalog.json et les produits de l'admin."""
+    admin_claims(authorization)
+    return admin_view(refresh_catalog())
+
+
+def _sync_loop():
+    while True:
+        try:
+            refresh_catalog()
+        except Exception as e:
+            print(f"⚠️ Synchronisation du catalogue en échec ({type(e).__name__}).")
+        time.sleep(CATALOG_REFRESH_SECONDS)
+
+
+@app.on_event("startup")
+def _start_catalog_sync():
+    threading.Thread(target=_sync_loop, daemon=True).start()
 
 
 if __name__ == "__main__":

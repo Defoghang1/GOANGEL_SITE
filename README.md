@@ -25,12 +25,22 @@ Vérification : `https://api.goangel.dpdns.org/api/health` doit afficher `fireba
 3. ⚠️ Avec votre propre *client_id* Google, publiez l'écran de consentement OAuth en **Production** : en mode « Test », le jeton expire après 7 jours et les téléchargements s'arrêtent.
 
 ## Envoyer les packs sur Google Drive
-Placez les ZIP dans `./packs` avec des noms en minuscules : `starter.zip`, `pro.zip`, `elite.zip` (nom du pack, minuscules, espaces → tirets).
+Placez les ZIP dans `./packs` : `starter.zip`, `pro.zip`, `elite.zip` ou avec version `pro-v1.2.0.zip` (nom du produit en minuscules, espaces → tirets).
 Actions → **Upload Packs to Google Drive** → *Run workflow*.
 ⚠️ Les fichiers d'un dépôt servi par GitHub Pages sont **publics**. Gardez `packs/` sur une branche qui n'est pas celle de Pages (ex. `packs-storage`) ou dans un dépôt privé, et indiquez-la dans le champ `source_ref` du workflow ; ne la fusionnez jamais dans la branche publiée.
 
 ## Téléchargement sécurisé
 `POST /api/download-token/{id}` (connecté, commande payée) → lien signé valable 2 min → `GET /api/download/{id}?token=…` : le serveur récupère le ZIP sur Drive (rclone), le renvoie en `FileResponse` puis supprime le fichier temporaire. 3 téléchargements simultanés maximum, dossier temporaire distinct par téléchargement.
+
+## Boutique : catalogue, stock, versions, promo
+- **Source de vérité de la disponibilité : Google Drive.** Au démarrage puis toutes les 5 minutes (`CATALOG_REFRESH_SECONDS`), le backend liste les ZIP présents (un seul appel `rclone lsjson`, aucun téléchargement) et reconstruit le catalogue. Le navigateur lit `GET /api/catalog` (connecté uniquement) : aucun secret ni accès Drive côté client.
+- **Infos commerciales** : `catalog.json` (nom, prix USDT, description, version, fonctionnalités, prérequis…) et/ou `admin.html` (collection Firestore `packs`, prioritaire pour le même nom). Un produit sans ZIP sur Drive passe seul en **Indisponible** (message d'épuisement, achat impossible). Il suffit de déposer le ZIP pour qu'il redevienne disponible, sans toucher au HTML.
+- **Versions** : `<id>.zip` (compte comme la version déclarée au catalogue) ou `<id>-vX.Y.Z.zip`. La version vendue est la plus haute (comparaison numérique : 1.10 > 1.2) ; égalité = fichier versionné ; `pinned_version` force une version. Les anciennes versions restent sur Drive. Chaque commande enregistre le fichier et la version achetés : le client reçoit toujours exactement ce qu'il a payé, même si une version plus récente arrive ensuite.
+- **Revérification** : Drive est consulté de nouveau juste avant la création du paiement et juste avant la livraison. Si Drive est injoignable, l'état est « vérification en cours » (jamais « épuisé » à tort) et aucun paiement n'est créé.
+- **Code promo** : bloc `promo` de `catalog.json` (`"enabled": false` pour désactiver le bandeau ET le code ; `"expires"` pour une date de fin). Le bandeau n'apparaît que si le serveur confirme que l'offre est active ; la remise est calculée côté serveur.
+- **Track record et témoignages** : saisis dans `admin.html` (collections Firestore `track_record` et `testimonials`). Sans donnée réelle, le site l'indique honnêtement ; rien n'est inventé.
+- **Indicateur IA** : la pastille reflète la réponse réelle de `/api/health` (« IA connectée » / « IA hors ligne »).
+- **Admin** : `admin.html` → « Catalogue & stock » (état, versions, fichiers non référencés, bouton « Synchroniser maintenant »).
 
 ## Règles à ne jamais casser
 1. `backend.py` : pas de `app.mount("/", StaticFiles(...))`.

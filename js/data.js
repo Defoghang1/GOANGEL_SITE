@@ -22,16 +22,14 @@ const SITE_DATA = {
     { t: "Payez en Crypto", d: "USDT ou TRX via le réseau Tron." },
     { t: "Recevez votre lien", d: "Après validation de la blockchain, téléchargez votre fichier." }
   ],
-  packs: [
-    { name: "Starter", price: "40", features: ["Cache complet", "Script d'inférence", "Support standard"], featured: false },
-    { name: "Pro", price: "120", features: ["Tout Starter", "Code source MLOps", "Documentation", "Mises à jour 1 mois"], featured: true },
-    { name: "Elite", price: "250", features: ["Tout Pro", "Accompagnement", "Déploiement", "Mises à jour à vie"], featured: false }
-  ],
   faq: [
     { q: "Comment vais-je recevoir mon produit ?", a: "Après confirmation du paiement crypto sur la blockchain, le site vous génère un lien de téléchargement sécurisé." },
     { q: "Quels moyens de paiement sont acceptés ?", a: "USDT et TRX sur le réseau Tron (TRC-20). Les frais de réseau sont très faibles." },
     { q: "Le bot garantit-il des gains ?", a: "Non. GOANGEL est un outil d'analyse statistique avancé. Les performances passées ne garantissent pas les résultats futurs." },
-    { q: "Mes données sont-elles protégées ?", a: "L'authentification est assurée par Firebase (Google) : votre mot de passe n'est jamais stocké en clair." }
+    { q: "Mes données sont-elles protégées ?", a: "L'authentification est assurée par Firebase (Google) : votre mot de passe n'est jamais stocké en clair." },
+    { q: "Comment vais-je recevoir mon pack ?", a: "Dès que le paiement crypto est validé sur la blockchain, un bouton de téléchargement apparaît sur votre écran. Le fichier est servi de manière sécurisée." },
+    { q: "Puis-je utiliser le script sur mon propre serveur ?", a: "Oui, le code source est totalement autonome et vous pouvez le déployer sur n'importe quelle machine disposant de Python." },
+    { q: "Y a-t-il un support technique ?", a: "Oui, une assistance est incluse pendant 30 jours après votre achat." }
   ],
   legal: [
     "<strong style='color:var(--gold); font-size:1.2rem;'>La puissance technologique de GOANGEL</strong>",

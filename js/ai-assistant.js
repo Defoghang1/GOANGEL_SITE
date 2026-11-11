@@ -1,5 +1,6 @@
 // 🤖 Assistant IA — appelle l'API (FastAPI + Ollama) via l'URL ABSOLUE du tunnel Cloudflare
 const AI_API_URL = "https://api.goangel.dpdns.org/api/chat";
+const AI_HEALTH_URL = "https://api.goangel.dpdns.org/api/health";
 
 function initUI() {
   if (document.getElementById('ai-widget')) return;
@@ -10,6 +11,7 @@ function initUI() {
       <div class="ai-input-area"><input type="text" id="ai-input" placeholder="Écrivez votre question..." autocomplete="off" maxlength="500"><button id="ai-send">Envoyer</button></div>
       <div class="ai-loading" id="ai-loading" style="display:none;">L'IA réfléchit...</div>
     </div>
+    <div id="ai-status" class="ai-status" data-state="checking" role="status" aria-live="polite" title="État vérifié automatiquement"><span class="ai-dot" aria-hidden="true"></span><span class="ai-status-text">Vérification de l'IA…</span></div>
     <button id="ai-toggle" aria-label="Ouvrir l'assistant IA">🤖</button>
   `);
 
@@ -20,7 +22,26 @@ function initUI() {
   const send = document.getElementById('ai-send');
   const messages = document.getElementById('ai-messages');
   const loading = document.getElementById('ai-loading');
+  const pill = document.getElementById('ai-status');
   let busy = false;
+
+  // État RÉEL : la pastille reflète la réponse de /api/health (aucune disponibilité n'est affirmée sans vérification)
+  async function checkStatus() {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    let state = 'offline';
+    try {
+      const r = await fetch(AI_HEALTH_URL, { cache: 'no-store', signal: ctrl.signal });
+      if (r.ok && (await r.json()).status === 'ok') state = 'online';
+    } catch (e) { /* hors ligne */ }
+    clearTimeout(t);
+    pill.dataset.state = state;
+    pill.querySelector('.ai-status-text').textContent = state === 'online' ? 'IA connectée' : 'IA hors ligne';
+    pill.title = 'Dernière vérification : ' + new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  }
+  checkStatus();
+  setInterval(() => { if (!document.hidden) checkStatus(); }, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkStatus(); });
 
   function appendMessage(role, text) {
     const div = document.createElement('div');
@@ -38,12 +59,14 @@ function initUI() {
   toggle.addEventListener('click', () => {
     widget.classList.remove('ai-closed');
     toggle.style.display = 'none';
+    pill.classList.add('ai-hidden');
     input.focus();
   });
 
   close.addEventListener('click', () => {
     widget.classList.add('ai-closed');
     toggle.style.display = 'block';
+    pill.classList.remove('ai-hidden');
   });
 
   send.addEventListener('click', async () => {
