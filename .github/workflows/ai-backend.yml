@@ -1,0 +1,226 @@
+name: GOANGEL AI Backend
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+# Une seule exécution active. Les nouvelles attendent (1 seule en file),
+# l'ancienne n'est JAMAIS annulée.
+concurrency:
+  group: goangel-ai-backend
+  cancel-in-progress: false
+
+jobs:
+  run-backend:
+    runs-on: ubuntu-latest
+    # Filet de sécurité uniquement (limite GitHub = 360 min)
+    timeout-minutes: 359
+
+    # ⚠️ Volontairement AUCUN secret rclone ici : la variable RCLONE_CONFIG est lue par rclone
+    # comme un CHEMIN de fichier. Elle n'est donc fournie qu'aux étapes Python (le backend la
+    # décode lui-même et appelle rclone avec --config).
+    env:
+      GOANGEL_STATE_DIR: /tmp/goangel-state
+      RUN_SECONDS: 21480   # 5 h 58 min
+
+    steps:
+      - name: Fixer l'échéance (5h58 depuis le début du job)
+        run: echo "DEADLINE=$(( $(date +%s) + RUN_SECONDS ))" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restaurer l'état précédent
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/goangel-state
+          key: goangel-state-none
+          restore-keys: |
+            goangel-state-
+
+      - name: Préparer le dossier d'état
+        run: |
+          mkdir -p "$GOANGEL_STATE_DIR"
+          echo "État restauré :"; ls -la "$GOANGEL_STATE_DIR"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Installer rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version | head -n 1
+
+      - name: Configurer rclone (secret RCLONE_CONFIG en Base64)
+        env:
+          RCLONE_CONFIG_B64: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          if [ -z "$RCLONE_CONFIG_B64" ]; then
+            echo "::warning::Secret RCLONE_CONFIG absent : les téléchargements de packs seront indisponibles."
+            exit 0
+          fi
+          mkdir -p "$HOME/.config/rclone"
+          python3 - <<'PY'
+          import base64, os
+          raw = os.environ["RCLONE_CONFIG_B64"].strip()
+          try:
+              if raw.startswith("["):
+                  text = raw
+              else:
+                  compact = "".join(raw.split())
+                  compact += "=" * (-len(compact) % 4)
+                  text = base64.b64decode(compact).decode("utf-8")
+              assert "[gdrive]" in text
+              path = os.path.expanduser("~/.config/rclone/rclone.conf")
+              fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+              with os.fdopen(fd, "w") as f:
+                  f.write(text)
+              print("Configuration rclone restaurée (remote gdrive présent).")
+          except Exception:
+              print("::warning::RCLONE_CONFIG invalide (Base64 d'un fichier rclone avec un remote [gdrive] attendu).")
+          PY
+          # Diagnostic non bloquant : le chat IA doit rester disponible même si Drive a un souci
+          rclone lsd gdrive: --max-depth 0 > /dev/null 2>&1 && echo "✅ Google Drive accessible" || echo "::warning::Google Drive inaccessible (jeton OAuth expiré ?)"
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama & Pull Model
+        run: |
+          ollama serve > ollama.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://localhost:11434/api/tags > /dev/null && break; sleep 2; done
+          ollama pull phi3:mini
+          curl -s http://localhost:11434/api/generate -d '{"model": "phi3:mini", "keep_alive": -1}' > /dev/null 2>&1 &
+          echo "✅ Modèle phi3:mini pré-chargé."
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start FastAPI Backend
+        # Les secrets DOIVENT être transmis ici, sinon backend.py ne voit ni Firebase, ni NOWPayments, ni Drive
+        env:
+          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
+          CRYPTO_API_KEY: ${{ secrets.CRYPTO_API_KEY }}
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          nohup python backend.py > backend.log 2>&1 &
+          echo $! > backend.pid
+          for i in $(seq 1 30); do curl -sf http://localhost:8000/api/health > /dev/null && break; sleep 1; done
+          kill -0 "$(cat backend.pid)" || { cat backend.log; exit 1; }
+          echo "Santé du backend :"; curl -s http://localhost:8000/api/health; echo
+          grep -E "NOWPayments|FIREBASE|RCLONE|rclone" backend.log || true
+
+      - name: Start Cloudflare Tunnel
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          nohup ./cloudflared tunnel run --token "$CLOUDFLARE_TUNNEL_TOKEN" > tunnel.log 2>&1 &
+          echo $! > tunnel.pid
+          sleep 10
+          if curl -sf --max-time 15 https://api.goangel.dpdns.org/api/health > /dev/null; then
+            echo "✅ BACKEND ACCESSIBLE PUBLIQUEMENT SUR https://api.goangel.dpdns.org"
+          else
+            echo "::warning::api.goangel.dpdns.org ne répond pas encore (vérifier tunnel.log et le DNS Cloudflare)."
+            tail -n 20 tunnel.log || true
+          fi
+
+      - name: Exécution jusqu'à l'échéance (supervision)
+        id: run
+        env:
+          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
+          CRYPTO_API_KEY: ${{ secrets.CRYPTO_API_KEY }}
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          start_backend() { nohup python backend.py >> backend.log 2>&1 & echo $! > backend.pid; }
+          start_tunnel()  { nohup ./cloudflared tunnel run --token "$CLOUDFLARE_TUNNEL_TOKEN" >> tunnel.log 2>&1 & echo $! > tunnel.pid; }
+          stop_pid()      { kill -TERM "$(cat "$1")" 2>/dev/null || true; sleep 2; kill -KILL "$(cat "$1")" 2>/dev/null || true; }
+
+          FAILS=0; PUB_FAILS=0; RESTARTS=0; TICK=0
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            TICK=$((TICK + 1))
+
+            # 1) FastAPI doit répondre en local
+            if kill -0 "$(cat backend.pid)" 2>/dev/null && curl -sf --max-time 10 http://localhost:8000/api/health > /dev/null; then
+              FAILS=0
+            else
+              FAILS=$((FAILS + 1)); echo "⚠️ Santé locale KO ($FAILS/3)"
+            fi
+            if [ "$FAILS" -ge 3 ]; then
+              RESTARTS=$((RESTARTS + 1))
+              if [ "$RESTARTS" -gt 5 ]; then echo "❌ Trop de redémarrages du backend"; tail -n 50 backend.log; exit 1; fi
+              echo "🔁 Redémarrage du backend ($RESTARTS/5)"
+              stop_pid backend.pid; start_backend; FAILS=0
+              sleep 15
+            fi
+
+            # 2) Le tunnel doit tourner
+            if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
+              echo "🔁 Tunnel arrêté : redémarrage"; start_tunnel
+            fi
+
+            # 3) Toutes les 5 min : l'API doit répondre depuis Internet (via Cloudflare)
+            if [ $((TICK % 10)) -eq 0 ]; then
+              if curl -sf --max-time 15 https://api.goangel.dpdns.org/api/health > /dev/null; then
+                PUB_FAILS=0
+              else
+                PUB_FAILS=$((PUB_FAILS + 1)); echo "⚠️ API publique injoignable ($PUB_FAILS/3)"
+                if [ "$PUB_FAILS" -ge 3 ]; then echo "🔁 Redémarrage du tunnel"; stop_pid tunnel.pid; start_tunnel; PUB_FAILS=0; fi
+              fi
+            fi
+            sleep 30
+          done
+          echo "⏱️ Échéance 5h58 atteinte."
+
+      - name: Arrêt propre du backend
+        if: always()
+        run: |
+          if [ -f backend.pid ] && kill -0 "$(cat backend.pid)" 2>/dev/null; then
+            kill -TERM "$(cat backend.pid)"
+            for i in $(seq 1 20); do
+              kill -0 "$(cat backend.pid)" 2>/dev/null || break
+              sleep 1
+            done
+            kill -KILL "$(cat backend.pid)" 2>/dev/null || true
+          fi
+          pkill -f cloudflared || true
+          pkill -f "ollama serve" || true
+          rm -f "$HOME/.config/rclone/rclone.conf"
+
+      - name: Écrire le marqueur d'état
+        if: always()
+        run: |
+          mkdir -p "$GOANGEL_STATE_DIR"
+          echo "{\"last_run\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"run_id\": \"${{ github.run_id }}\"}" > "$GOANGEL_STATE_DIR/run_meta.json"
+
+      - name: Sauvegarder l'état
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/goangel-state
+          key: goangel-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Relance automatique (une seule, sans boucle)
+        # Uniquement si le cycle s'est terminé normalement à l'échéance
+        if: always() && steps.run.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          WAITING=0
+          for s in queued pending waiting requested; do
+            n=$(gh run list --workflow ai-backend.yml --status "$s" --json databaseId --jq 'length' --repo "${{ github.repository }}")
+            WAITING=$((WAITING + n))
+          done
+          if [ "$WAITING" -gt 0 ]; then
+            echo "Une exécution est déjà en attente, pas de nouvelle relance."
+          else
+            gh workflow run ai-backend.yml --ref main --repo "${{ github.repository }}"
+            echo "✅ Relance planifiée (démarrera après la fin de ce job)."
+          fi

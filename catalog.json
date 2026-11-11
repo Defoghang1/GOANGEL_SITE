@@ -1,0 +1,82 @@
+{
+  "_aide": [
+    "Catalogue commercial lu par backend.py (jamais par le navigateur). La DISPONIBILITÉ vient toujours de Google Drive (gdrive:goangel_packs).",
+    "Fichier ZIP d'un produit : <id>.zip ou <id>-vX.Y.Z.zip (ex. pro-v1.2.0.zip). Version vendue = la plus haute ; <id>.zip compte comme la version déclarée ici ; égalité = fichier versionné. Les anciennes versions restent sur Drive.",
+    "Pour forcer une version : ajouter \"pinned_version\": \"1.2.0\" (le fichier <id>-v1.2.0.zip doit exister).",
+    "Promo : \"enabled\": false pour désactiver le bandeau ET le code ; \"expires\": \"2026-12-31\" pour une date de fin. Les prix sont toujours recalculés côté serveur.",
+    "Un produit peut aussi être ajouté/modifié depuis admin.html (collection Firestore « packs », prioritaire sur ce fichier pour le même nom)."
+  ],
+  "promo": {
+    "enabled": true,
+    "code": "GOANGEL20",
+    "percent": 20,
+    "pack": "pro",
+    "message": "🔥 Offre de lancement : -20% sur le pack Pro avec le code GOANGEL20",
+    "expires": null
+  },
+  "products": [
+    {
+      "id": "starter",
+      "name": "Starter",
+      "order": 1,
+      "icon": "🚀",
+      "price_usdt": 40,
+      "version": "1.0.0",
+      "featured": false,
+      "tagline": "Le point d'entrée : cache complet et script d'inférence prêts à l'emploi.",
+      "description": "Le pack Starter vous donne le cache complet et le script d'inférence GOANGEL pour produire vos propres analyses de matchs de football avec des probabilités calibrées.",
+      "long_description": "Starter est la façon la plus directe de découvrir le moteur GOANGEL. Vous recevez le cache complet et le script d'inférence : vous pouvez lancer des analyses sur votre propre machine, sans dépendre d'un service tiers. Les probabilités s'appuient sur les approches décrites sur le site (modèles à base d'arbres, modèles statistiques de football comme Poisson et Dixon-Coles) avec une validation Walk-Forward sans fuite de données et une calibration isotonique. GOANGEL est un outil d'analyse statistique : il ne garantit aucun gain.",
+      "features": ["Cache complet", "Script d'inférence", "Support standard", "Assistance incluse pendant 30 jours"],
+      "benefits": ["Mise en route rapide : tout est livré dans un seul ZIP", "Fonctionne sur votre propre machine", "Probabilités calibrées plutôt que des promesses"],
+      "technologies": ["Python", "XGBoost et modèles à base d'arbres", "Modèles Poisson / Dixon-Coles", "Calibration isotonique", "Validation Walk-Forward"],
+      "included_files": ["Cache complet", "Script d'inférence"],
+      "requirements": ["Python 3 installé sur la machine", "Les dépendances Python demandées par le script (installation avec pip)"],
+      "compatibility": ["Windows, macOS et Linux : toute machine disposant de Python"],
+      "usage": ["Téléchargez le ZIP depuis « Vos achats » après validation du paiement", "Décompressez-le dans un dossier dédié", "Installez les dépendances Python requises", "Lancez le script d'inférence"],
+      "updates": "Les mises à jour ne sont pas incluses dans ce pack.",
+      "delivery": "Téléchargement dès la confirmation du paiement USDT (TRC-20) sur la blockchain, via un lien sécurisé de 2 minutes que vous pouvez régénérer depuis « Vos achats »."
+    },
+    {
+      "id": "pro",
+      "name": "Pro",
+      "order": 2,
+      "icon": "⚡",
+      "price_usdt": 120,
+      "version": "1.0.0",
+      "featured": true,
+      "tagline": "Tout Starter, plus le code source MLOps, la documentation et 1 mois de mises à jour.",
+      "description": "Le pack Pro inclut tout Starter, le code source MLOps et la documentation, avec un mois de mises à jour, pour comprendre, adapter et faire évoluer le moteur.",
+      "long_description": "Pro s'adresse à ceux qui veulent aller au-delà de l'exécution : vous recevez tout le contenu de Starter, le code source MLOps (pipeline de modèles) et la documentation. Vous pouvez comprendre comment les modèles sont assemblés, adapter le pipeline à vos besoins et le déployer sur votre propre infrastructure. Un mois de mises à jour est inclus après l'achat. GOANGEL est un outil d'analyse statistique : il ne garantit aucun gain.",
+      "features": ["Tout Starter", "Code source MLOps", "Documentation", "Mises à jour 1 mois", "Assistance incluse pendant 30 jours"],
+      "benefits": ["Code source complet pour adapter le pipeline", "Documentation pour prendre le projet en main", "Un mois de mises à jour inclus"],
+      "technologies": ["Python", "XGBoost, LightGBM, CatBoost", "Modèles Poisson / Dixon-Coles", "Calibration isotonique", "Validation Walk-Forward", "Pipeline MLOps"],
+      "included_files": ["Tout le contenu du pack Starter", "Code source MLOps", "Documentation"],
+      "requirements": ["Python 3 installé sur la machine", "Les dépendances Python indiquées dans la documentation (installation avec pip)"],
+      "compatibility": ["Windows, macOS et Linux : toute machine disposant de Python", "Déployable sur votre propre serveur"],
+      "usage": ["Téléchargez le ZIP depuis « Vos achats » après validation du paiement", "Décompressez-le et lisez d'abord la documentation", "Installez les dépendances indiquées", "Lancez le script d'inférence ou adaptez le pipeline MLOps"],
+      "updates": "Mises à jour incluses pendant 1 mois après l'achat.",
+      "delivery": "Téléchargement dès la confirmation du paiement USDT (TRC-20) sur la blockchain, via un lien sécurisé de 2 minutes que vous pouvez régénérer depuis « Vos achats »."
+    },
+    {
+      "id": "elite",
+      "name": "Elite",
+      "order": 3,
+      "icon": "👑",
+      "price_usdt": 250,
+      "version": "1.0.0",
+      "featured": false,
+      "tagline": "Tout Pro, plus l'accompagnement, le déploiement et les mises à jour à vie.",
+      "description": "Le pack Elite inclut tout Pro, avec accompagnement, aide au déploiement et mises à jour à vie.",
+      "long_description": "Elite est l'offre complète : tout le contenu de Pro, un accompagnement pour la prise en main, le déploiement du moteur et les mises à jour à vie du pack. C'est le choix de ceux qui veulent une mise en production sereine et un suivi dans la durée. GOANGEL est un outil d'analyse statistique : il ne garantit aucun gain.",
+      "features": ["Tout Pro", "Accompagnement", "Déploiement", "Mises à jour à vie", "Assistance incluse pendant 30 jours"],
+      "benefits": ["Accompagnement pour la mise en route", "Aide au déploiement", "Mises à jour à vie du pack"],
+      "technologies": ["Python", "XGBoost, LightGBM, CatBoost", "Modèles Poisson / Dixon-Coles", "Calibration isotonique", "Validation Walk-Forward", "Pipeline MLOps"],
+      "included_files": ["Tout le contenu du pack Pro", "Éléments de déploiement"],
+      "requirements": ["Python 3 installé sur la machine", "Les dépendances Python indiquées dans la documentation (installation avec pip)"],
+      "compatibility": ["Windows, macOS et Linux : toute machine disposant de Python", "Déployable sur votre propre serveur"],
+      "usage": ["Téléchargez le ZIP depuis « Vos achats » après validation du paiement", "Décompressez-le et lisez d'abord la documentation", "Suivez les instructions de déploiement", "Contactez-nous pour l'accompagnement"],
+      "updates": "Mises à jour à vie.",
+      "delivery": "Téléchargement dès la confirmation du paiement USDT (TRC-20) sur la blockchain, via un lien sécurisé de 2 minutes que vous pouvez régénérer depuis « Vos achats »."
+    }
+  ]
+}
