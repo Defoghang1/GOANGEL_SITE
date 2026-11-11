@@ -85,7 +85,7 @@ jobs:
               print("::warning::RCLONE_CONFIG invalide (Base64 d'un fichier rclone avec un remote [gdrive] attendu).")
           PY
           # Diagnostic non bloquant : le chat IA doit rester disponible même si Drive a un souci
-          rclone lsd gdrive: --max-depth 0 > /dev/null 2>&1 && echo "✅ Google Drive accessible" || echo "::warning::Google Drive inaccessible (jeton OAuth expiré ?)"
+          rclone lsd gdrive_wadoum: --max-depth 0 > /dev/null 2>&1 && echo "✅ Google Drive accessible" || echo "::warning::Google Drive inaccessible (jeton OAuth expiré ?)"
 
       - name: Install Ollama
         run: curl -fsSL https://ollama.com/install.sh | sh
