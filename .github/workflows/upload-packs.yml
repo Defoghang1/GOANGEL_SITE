@@ -1,6 +1,6 @@
 name: Upload Packs to Google Drive
 
-# Envoie le contenu du dossier ./packs (fichiers .zip) vers gdrive:goangel_packs
+# Envoie le contenu du dossier ./packs (fichiers .zip) vers gdrive_wadoum:goangel_packs
 on:
   workflow_dispatch:
     inputs:
@@ -67,10 +67,10 @@ jobs:
 
       - name: Vérifier l'accès à Google Drive
         run: |
-          rclone lsd gdrive: --max-depth 0 || { echo "::error::Connexion à Google Drive impossible : jeton OAuth expiré ou configuration invalide (voir README)."; exit 1; }
+          rclone lsd gdrive_wadoum: --max-depth 0 || { echo "::error::Connexion à Google Drive impossible : jeton OAuth expiré ou configuration invalide (voir README)."; exit 1; }
 
       - name: Créer le dossier distant si nécessaire
-        run: rclone mkdir gdrive:goangel_packs
+        run: rclone mkdir gdrive_wadoum:goangel_packs
 
       - name: Vérifier le contenu de ./packs
         run: |
@@ -95,14 +95,14 @@ jobs:
           [ "$BAD" -eq 0 ] || exit 1
           ls -lh ./packs
 
-      - name: Transférer ./packs vers gdrive:goangel_packs
+      - name: Transférer ./packs vers gdrive_wadoum:goangel_packs
         run: |
-          rclone copy ./packs gdrive:goangel_packs \
+          rclone copy ./packs gdrive_wadoum:goangel_packs \
             --include "*.zip" --checksum --transfers 2 \
             --drive-chunk-size 64M -v --stats 15s --stats-one-line
 
       - name: Contenu final du dossier distant
-        run: rclone lsl gdrive:goangel_packs
+        run: rclone lsl gdrive_wadoum:goangel_packs
 
       - name: Supprimer la configuration rclone du runner
         if: always()
