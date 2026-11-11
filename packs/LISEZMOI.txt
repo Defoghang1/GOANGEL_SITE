@@ -1,6 +1,0 @@
-Placez ici vos fichiers ZIP de packs : starter.zip, pro.zip, elite.zip
-ou avec version : pro-v1.2.0.zip (la version la plus haute est vendue)
-(noms en minuscules, tirets à la place des espaces), puis lancez le workflow
-"Upload Packs to Google Drive". ATTENTION : si ce dossier est sur la branche servie
-par GitHub Pages, les ZIP deviennent publics. Utilisez une autre branche
-(ex. packs-storage) ou un dépôt privé. Voir README.md.
