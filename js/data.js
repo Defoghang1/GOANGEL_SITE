@@ -1,7 +1,7 @@
 const SITE_DATA = {
   hero: {
     title: "Des probabilités de football calibrées, pas des promesses",
-    subtitle: "Un moteur d'analyse qui combine XGBoost, Poisson et Dixon-Coles, validé sans fuite de données.",
+    subtitle: "Une intelligence artificielle de pointe qui analyse des milliers de données pour vous offrir les probabilités les plus précises du marché.",
     cta: "Ouvrir le bot Telegram",
     cta2: "Lancer la simulation"
   },
