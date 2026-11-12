@@ -120,11 +120,35 @@
         </div>
         <div class="admin-card">
           <h2>Catalogue &amp; stock (Google Drive)</h2>
-          <p class="form-hint">L'état vient des fichiers réellement présents sur Drive. Le catalogue se synchronise tout seul toutes les 5 minutes.</p>
-          <button type="button" class="btn" id="sync-btn">Synchroniser maintenant</button>
+          <p class="form-hint">L'état vient des fichiers réellement présents sur Drive. La synchronisation est automatique (toutes les 2 secondes) : déposez un ZIP et la boutique se met à jour seule, sans aucune action ici.</p>
+          <button type="button" class="btn" id="sync-btn">Vérifier maintenant (facultatif)</button>
           <p id="sync-status" style="font-size:.9rem;margin:.6rem 0;min-height:1.2rem;" role="status"></p>
           <ul class="admin-list" id="stock-list"></ul>
           <p class="form-hint" id="unlisted-box"></p>
+        </div>
+        <div class="admin-card">
+          <h2>Code promo &amp; bandeau</h2>
+          <p class="form-hint">La réduction est enregistrée sur le compte de chaque client qui saisit le code : elle ne change jamais le prix des autres utilisateurs. Vos modifications s'appliquent en quelques secondes, sans redéploiement.</p>
+          <p id="promo-state" style="font-size:.9rem;margin:.4rem 0 1rem;min-height:1.2rem;" role="status"></p>
+          <form id="promo-form-admin">
+            <div class="form-group"><label>Offre active ?</label>
+              <select id="promo-enabled"><option value="true">Oui</option><option value="false">Non (désactivée)</option></select></div>
+            <div class="form-group"><label>Code promo</label>
+              <input type="text" id="promo-code" maxlength="30" placeholder="GOANGEL20" autocapitalize="characters" required>
+              <p class="form-hint">Lettres, chiffres, tiret ou souligné (3 à 30). Les clients peuvent le saisir en minuscules.</p></div>
+            <div class="form-group"><label>Réduction (%)</label>
+              <input type="number" id="promo-percent" min="1" max="90" step="1" required></div>
+            <div class="form-group"><label>Pack concerné</label>
+              <select id="promo-pack"><option value="">Tous les packs</option></select></div>
+            <div class="form-group"><label>Message du bandeau (optionnel)</label>
+              <input type="text" id="promo-message" maxlength="200" placeholder="🔥 Offre de lancement : -20% sur le pack Pro avec le code GOANGEL20"></div>
+            <div class="form-group"><label>Afficher le bandeau doré ?</label>
+              <select id="promo-banner"><option value="true">Oui</option><option value="false">Non (code privé, à communiquer vous-même)</option></select></div>
+            <div class="form-group"><label>Date de fin (optionnel)</label>
+              <input type="date" id="promo-expires"></div>
+            <button type="submit" class="btn">Enregistrer l'offre</button>
+            <button type="button" class="btn ghost" id="promo-toggle">Désactiver l'offre</button>
+          </form>
         </div>
         <div class="admin-card">
           <h2>Track record (résultats réels)</h2>

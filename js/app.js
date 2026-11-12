@@ -7,7 +7,7 @@ import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/
 const API = "https://api.goangel.dpdns.org";
 const CLOUDINARY_URL = "https://api.cloudinary.com/v1_1/gkiui3xc/image/upload";
 const CLOUDINARY_PRESET = "goangel_unsigned";
-const SHOP_REFRESH_MS = 120000;
+const VERSION_POLL_MS = 3000;          // le site demande « le catalogue a-t-il changé ? » (réponse minuscule)
 
 const $ = id => document.getElementById(id);
 const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -22,12 +22,12 @@ let user = null;
 let payTimer = null;
 let shopTimer = null;
 let catalog = { products: [], promo: null, drive: "unknown", loaded: false, error: null };
-let promoCode = store.get("goangel_promo");
 
 // ---------- API (avec jeton Firebase) ----------
 async function api(path, opts = {}) {
   const token = await Auth.token();
   const res = await fetch(API + path, {
+    cache: "no-store",
     ...opts,
     headers: { "Content-Type": "application/json", Authorization: "Bearer " + token, ...(opts.headers || {}) }
   });
@@ -62,46 +62,70 @@ let catalogLoading = null;
 function fetchCatalog() {
   if (catalogLoading) return catalogLoading;
   catalogLoading = api("/api/catalog")
-    .then(d => { catalog = { products: d.products || [], promo: d.promo || null, drive: d.drive, loaded: true, error: null, at: Date.now() }; if (promoCode && !promoValid()) { promoCode = ""; store.set("goangel_promo", ""); } })
+    .then(d => { catalog = { products: d.products || [], promo: d.promo || null, myPromo: d.my_promo || null, drive: d.drive, loaded: true, error: null, at: Date.now(), version: d.version }; })
     .catch(e => { catalog = { ...catalog, loaded: true, error: e.message || "Catalogue indisponible." }; })
     .finally(() => { catalogLoading = null; onCatalogChange(); });
   return catalogLoading;
 }
+let versionBusy = false;
+async function checkCatalogVersion() {
+  if (document.hidden || versionBusy || catalogLoading) return;
+  versionBusy = true;
+  try {
+    const v = await api("/api/catalog-version");
+    if (v.version && v.version !== catalog.version) await fetchCatalog();      // le catalogue complet n'est rechargé que s'il a changé
+  } catch (e) { /* serveur hors ligne : nouvel essai au prochain passage */ }
+  finally { versionBusy = false; }
+}
 const productById = id => catalog.products.find(p => p.id === id);
-const promoValid = () => !!(catalog.promo && promoCode && promoCode === catalog.promo.code);
-const promoApplies = p => promoValid() && (!catalog.promo.pack_id || catalog.promo.pack_id === p.id);
-const priceOf = p => promoApplies(p) ? +(Number(p.price_usdt) * (1 - catalog.promo.percent / 100)).toFixed(2) : Number(p.price_usdt);
-function onCatalogChange() { renderPromo(); renderShop(); renderCart(); }
+const promoApplies = p => !!catalog.myPromo && (!catalog.myPromo.pack_id || catalog.myPromo.pack_id === p.id);
+const priceOf = p => promoApplies(p) ? +(Number(p.price_usdt) * (1 - catalog.myPromo.percent / 100)).toFixed(2) : Number(p.price_usdt);
+function onCatalogChange() { renderPromo(); renderShop(); renderCart(); syncPromoForm(); }
 
 // ---------- Bandeau promotionnel (affiché uniquement si le serveur confirme que l'offre est active) ----------
 function renderPromo() {
   const slot = $("promo-slot"); if (!slot) return;
-  const pr = catalog.promo;
-  if (!pr || store.get("goangel_promo_x_" + pr.code)) { slot.innerHTML = ""; return; }
+  const pr = catalog.promo, xKey = pr && "goangel_promo_x_" + user.uid + "_" + pr.code;
+  if (!pr || store.get(xKey)) { slot.innerHTML = ""; return; }
+  const mine = catalog.myPromo && catalog.myPromo.code === pr.code;
   slot.innerHTML = `<div class="promo-bar" role="region" aria-label="Offre promotionnelle">
     <span class="promo-msg">${esc(pr.message)}</span>
-    <button class="promo-use" type="button">Utiliser le code</button>
+    <button class="promo-use" type="button"${mine ? " disabled" : ""}>${mine ? "✓ Code appliqué" : "Utiliser le code"}</button>
     <button class="promo-x" type="button" aria-label="Fermer l'offre">×</button></div>`;
-  slot.querySelector(".promo-x").onclick = () => { store.set("goangel_promo_x_" + pr.code, "1"); slot.innerHTML = ""; };
+  slot.querySelector(".promo-x").onclick = () => { store.set(xKey, "1"); slot.innerHTML = ""; };
   slot.querySelector(".promo-use").onclick = async () => {
-    try { await navigator.clipboard.writeText(pr.code); } catch (e) {}
-    applyPromo(pr.code);
-    if (location.hash !== "#pricing") location.hash = "pricing"; else { const s = $("shop"); if (s) s.scrollIntoView({ behavior: "smooth" }); }
+    if (await applyPromo(pr.code)) {
+      if (location.hash !== "#pricing") location.hash = "pricing"; else { const s = $("shop"); if (s) s.scrollIntoView({ behavior: "smooth" }); }
+    }
   };
 }
-function applyPromo(code) {
+// La réduction est enregistrée côté serveur pour CE compte uniquement : elle ne change jamais le prix des autres utilisateurs.
+async function applyPromo(code) {
   code = String(code || "").trim().toUpperCase();
-  const msg = $("promo-msg"), input = $("promo-input");
-  if (code && catalog.promo && code === catalog.promo.code) {
-    promoCode = code; store.set("goangel_promo", code);
-    const pk = catalog.promo.pack_id ? productById(catalog.promo.pack_id) : null;
-    if (msg) msg.textContent = `✅ Code appliqué : -${catalog.promo.percent} %${pk ? " sur le pack " + pk.name : ""}.`;
-  } else {
-    promoCode = ""; store.set("goangel_promo", "");
-    if (msg) msg.textContent = code ? "❌ Code invalide ou expiré." : "";
-  }
-  if (input) input.value = promoCode || code;
-  renderShop(); renderCart();
+  const msg = $("promo-msg");
+  if (!code) { if (msg) msg.textContent = "Saisissez un code promo."; return false; }
+  try {
+    const r = await api("/api/promo/apply", { method: "POST", body: JSON.stringify({ code }) });
+    catalog.myPromo = r.promo;
+    const pk = r.promo.pack_id ? productById(r.promo.pack_id) : null;
+    if (msg) msg.textContent = `✅ Code appliqué à votre compte : -${r.promo.percent} %${pk ? " sur le pack " + pk.name : " sur tous les packs"}.`;
+    syncPromoForm(); renderShop(); renderCart(); renderPromo();
+    return true;
+  } catch (e) { if (msg) msg.textContent = "❌ " + e.message; return false; }
+}
+async function clearPromo() {
+  try {
+    await api("/api/promo/clear", { method: "POST" });
+    catalog.myPromo = null;
+    const msg = $("promo-msg"); if (msg) msg.textContent = "Code retiré de votre compte.";
+    syncPromoForm(); renderShop(); renderCart(); renderPromo();
+  } catch (e) { const msg = $("promo-msg"); if (msg) msg.textContent = "❌ " + e.message; }
+}
+function syncPromoForm() {
+  const input = $("promo-input"), clr = $("promo-clear"); if (!input) return;
+  if (catalog.myPromo) { input.value = catalog.myPromo.code; input.dataset.applied = "1"; }
+  else if (input.dataset.applied) { input.value = ""; delete input.dataset.applied; }
+  if (clr) clr.hidden = !catalog.myPromo;
 }
 
 // ---------- Fiches produit ----------
@@ -112,7 +136,7 @@ function stateBadge(p) {
 }
 function priceBlock(p) {
   const base = Number(p.price_usdt), now = priceOf(p);
-  return `<div class="amount">${now !== base ? `<s class="was">${fmtPrice(base)}</s> ` : ""}${fmtPrice(now)} <small>USDT (TRC-20)</small></div>${promoApplies(p) ? `<p class="promo-tag">Code ${esc(promoCode)} : -${catalog.promo.percent} %</p>` : ""}`;
+  return `<div class="amount">${now !== base ? `<s class="was">${fmtPrice(base)}</s> ` : ""}${fmtPrice(now)} <small>USDT (TRC-20)</small></div>${promoApplies(p) ? `<p class="promo-tag">Code ${esc(catalog.myPromo.code)} : -${catalog.myPromo.percent} %</p>` : ""}`;
 }
 function artBlock(p, small) {
   const img = safeUrl(p.image_url);
@@ -168,7 +192,7 @@ function openDetails(id) {
   const buy = p.available ? `<button class="btn buy-btn" data-buy="${esc(p.id)}">${label}</button>` : `<button class="btn buy-btn" disabled aria-disabled="true">${p.state === "unknown" ? "Vérification…" : "Indisponible"}</button>`;
   const inner = `
     <div class="pd-head">${artBlock(p, true)}<div><h2>Pack ${esc(p.name)} <span class="prod-ver">v${esc(p.version)}</span></h2><p class="muted">${esc(p.tagline || "")}</p></div></div>
-    <div class="pd-buy"><div>${now !== base ? `<s class="was">${fmtPrice(base)}</s> ` : ""}<b class="pd-price">${fmtPrice(now)} USDT</b>${promoApplies(p) ? ` <span class="promo-tag">Code ${esc(promoCode)} : -${catalog.promo.percent} %</span>` : ""}</div>${buy}</div>
+    <div class="pd-buy"><div>${now !== base ? `<s class="was">${fmtPrice(base)}</s> ` : ""}<b class="pd-price">${fmtPrice(now)} USDT</b>${promoApplies(p) ? ` <span class="promo-tag">Code ${esc(catalog.myPromo.code)} : -${catalog.myPromo.percent} %</span>` : ""}</div>${buy}</div>
     ${p.available ? "" : `<p class="prod-soldout" role="status">${esc(p.message)}</p>`}
     ${detailSection("Description", p.long_description || p.description)}
     ${detailSection("Fonctionnalités", p.features)}
@@ -263,7 +287,7 @@ async function initiatePayment(productId, btn) {
   const old = btn.textContent; btn.disabled = true; btn.textContent = "Création…";
   try {
     const body = { product_id: productId };
-    if (p && promoApplies(p)) body.promo_code = promoCode;      // le serveur revérifie tout (disponibilité, code, prix)
+    if (p && promoApplies(p)) body.promo_code = catalog.myPromo.code;      // le serveur revérifie tout (disponibilité, code, prix)
     const order = await api("/api/create-payment", { method: "POST", body: JSON.stringify(body) });
     showPayModal(order);
     refreshOrders();
@@ -408,7 +432,7 @@ const pages = {
     <section class="block tight"><h2>Nos dernières analyses</h2><div id="track-box"><p class="muted">Chargement…</p></div>
       <p class="tr-note">Les performances passées ne préjugent pas des performances futures. Notre force est la transparence.</p></section>
     <section class="block tight" id="shop"><h2>Choisissez votre pack</h2>
-      <form id="promo-form" class="promo-row" autocomplete="off"><label for="promo-input">Code promo</label><input id="promo-input" maxlength="40" placeholder="Votre code" value="${esc(promoCode)}"><button class="btn small ghost" type="submit">Appliquer</button></form>
+      <form id="promo-form" class="promo-row" autocomplete="off"><label for="promo-input">Code promo</label><input id="promo-input" maxlength="40" placeholder="Votre code" value="${esc(catalog.myPromo ? catalog.myPromo.code : "")}"><button class="btn small ghost" type="submit">Appliquer</button><button class="btn small ghost" type="button" id="promo-clear"${catalog.myPromo ? "" : " hidden"}>Retirer</button></form>
       <p id="promo-msg" class="form-hint" role="status"></p>
       <div id="shop-box"><p class="muted">Chargement du catalogue…</p></div></section>
     <section class="block tight pc"><h2>Que contient le pack ?</h2>
@@ -447,9 +471,11 @@ const router = () => {
   if (key === "media") renderMedia();
   if (key === "pricing") {
     $("promo-form").onsubmit = e => { e.preventDefault(); applyPromo($("promo-input").value); };
+    $("promo-clear").onclick = clearPromo;
+    syncPromoForm();
     renderTrack(); renderReviews(); refreshOrders(); renderShop();
     if (!catalog.loaded || Date.now() - (catalog.at || 0) > 30000) fetchCatalog();
-    shopTimer = setInterval(fetchCatalog, SHOP_REFRESH_MS);      // détecte ruptures de stock / nouvelles versions sans recharger
+    shopTimer = setInterval(checkCatalogVersion, VERSION_POLL_MS);   // nouveau ZIP, rupture de stock, nouvelle version : la boutique se met à jour seule
   }
 };
 
@@ -515,6 +541,7 @@ const start = async () => {
   };
   renderCart();
 
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && currentKey === "pricing") checkCatalogVersion(); });
   addEventListener("hashchange", router);
   router();
   fetchCatalog();                                   // bandeau promo (accueil) + boutique

@@ -1,6 +1,6 @@
 import { auth, db } from "./firebase-config.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { collection, doc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, doc, getDoc, getDocs, addDoc, updateDoc, setDoc, deleteDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const API = "https://api.goangel.dpdns.org";
 const $ = id => document.getElementById(id);
@@ -44,8 +44,11 @@ function showContent() {
 }
 
 // ---------- Catalogue & stock ----------
+let lastView = null;
+let promoFormFilled = false;
 const STATE_LABEL = { available: "✅ Disponible", unavailable: "⛔ Indisponible (épuisé)", unknown: "⚠️ Non vérifiable" };
 function renderStock(v) {
+  lastView = v; renderPromoState(v);
   const list = $("stock-list"); list.innerHTML = "";
   (v.products || []).forEach(p => {
     const li = document.createElement("li");
@@ -57,8 +60,13 @@ function renderStock(v) {
   $("unlisted-box").textContent = v.unlisted && v.unlisted.length
     ? "Fichiers présents sur Drive mais absents du catalogue (nom à rapprocher d'un produit) : " + v.unlisted.join(", ") : "";
   const st = $("sync-status");
-  if (v.drive === "ok") { st.textContent = "Drive connecté — dernière synchronisation : " + new Date(v.synced_at).toLocaleTimeString("fr-FR"); st.style.color = "var(--pos)"; }
-  else { st.textContent = "⚠️ Drive : " + (v.error || v.drive); st.style.color = "var(--err)"; }
+  const age = v.checked_age_seconds;
+  if (v.drive === "ok") {
+    const fresh = age !== null && age < 30;
+    st.textContent = fresh ? `✅ Synchronisation automatique active : Drive vérifié il y a ${Math.round(age)} s (toutes les ${v.poll_seconds} s)`
+                           : "⚠️ Aucune vérification récente de Drive : le serveur relance la surveillance automatiquement.";
+    st.style.color = fresh ? "var(--pos)" : "var(--gold)";
+  } else { st.textContent = "⚠️ Drive : " + (v.error || v.drive) + " — nouvelle tentative automatique en cours"; st.style.color = "var(--err)"; }
 }
 async function loadStock() { try { renderStock(await adminApi("/api/admin/catalog")); } catch (e) { const st = $("sync-status"); st.textContent = "Serveur indisponible : " + e.message; st.style.color = "var(--err)"; } }
 async function syncNow(quiet) {
@@ -67,6 +75,61 @@ async function syncNow(quiet) {
   try { renderStock(await adminApi("/api/admin/sync", "POST")); } catch (e) { st.textContent = "❌ " + e.message; st.style.color = "var(--err)"; }
 }
 $("sync-btn").addEventListener("click", () => syncNow(false));
+setInterval(() => { if (!document.hidden && !$("admin-content").classList.contains("hidden")) loadStock(); }, 5000);   // état en direct
+
+
+// ---------- Code promo & bandeau (Firestore settings/promo, lu par le backend) ----------
+function fillPromoForm(v) {
+  const c = v.promo_config || {};
+  const sel = $("promo-pack");
+  sel.innerHTML = '<option value="">Tous les packs</option>' + (v.products || []).map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  $("promo-enabled").value = c.enabled === true ? "true" : "false";
+  $("promo-code").value = c.code || "";
+  $("promo-percent").value = c.percent || "";
+  sel.value = c.pack || "";
+  $("promo-message").value = c.message || "";
+  $("promo-banner").value = c.banner === false ? "false" : "true";
+  $("promo-expires").value = c.expires ? String(c.expires).slice(0, 10) : "";
+  promoFormFilled = true;
+}
+function renderPromoState(v) {
+  if (!promoFormFilled && v.promo_config) fillPromoForm(v);
+  const el = $("promo-state"), src = v.promo_source === "admin" ? "définie ici" : "valeur par défaut de catalog.json";
+  const cfg = v.promo_config || {};
+  if (v.promo) {
+    const pk = (v.products || []).find(p => p.id === v.promo.pack_id);
+    el.textContent = `✅ Offre ACTIVE (${src}) : code ${v.promo.code}, -${v.promo.percent} % sur ${pk ? "le pack " + pk.name : "tous les packs"}, bandeau ${v.promo.banner ? "affiché" : "masqué"}.`;
+    el.style.color = "var(--pos)";
+  } else {
+    el.textContent = cfg.enabled ? `⛔ Offre configurée mais inactive (${src}) : date dépassée ou réglages invalides.` : `⛔ Aucune offre active (${src}) : ni bandeau ni code ne fonctionnent.`;
+    el.style.color = "var(--err)";
+  }
+  $("promo-toggle").textContent = v.promo ? "Désactiver l'offre" : "Activer l'offre";
+}
+async function savePromo(data) {
+  await setDoc(doc(db, "settings", "promo"), data);
+  promoFormFilled = false;
+  await syncNow(true);                          // le serveur relit l'offre immédiatement
+}
+$("promo-form-admin").addEventListener("submit", async e => {
+  e.preventDefault();
+  const code = $("promo-code").value.trim().toUpperCase(), pct = Number($("promo-percent").value);
+  if (!/^[A-Z0-9_-]{3,30}$/.test(code)) { alert("Code invalide : 3 à 30 caractères (lettres, chiffres, - ou _)."); return; }
+  if (!(pct >= 1 && pct <= 90)) { alert("La réduction doit être comprise entre 1 et 90 %."); return; }
+  try {
+    await savePromo({ enabled: $("promo-enabled").value === "true", code, percent: pct, pack: $("promo-pack").value,
+      message: $("promo-message").value.trim(), banner: $("promo-banner").value === "true", expires: $("promo-expires").value || "",
+      updatedAt: new Date().toISOString() });
+  } catch (err) { alert("Erreur d'enregistrement : " + (err.code || err.message)); }
+});
+$("promo-toggle").addEventListener("click", async () => {
+  if (!lastView) return;
+  const cfg = { ...(lastView.promo_config || {}) }, turnOff = !!lastView.promo;
+  try {
+    await savePromo({ enabled: !turnOff, code: cfg.code || "", percent: cfg.percent || 0, pack: cfg.pack || "", message: cfg.message || "",
+      banner: cfg.banner !== false, expires: cfg.expires || "", updatedAt: new Date().toISOString() });
+  } catch (err) { alert("Erreur d'enregistrement : " + (err.code || err.message)); }
+});
 
 // ---------- Packs / produits ----------
 function resetPackForm() {

@@ -1,5 +1,7 @@
 import os
 import re
+import atexit
+import socket
 import json
 import time
 import glob
@@ -72,7 +74,7 @@ def init_firebase():
 db = init_firebase()
 
 # --- GOOGLE DRIVE via rclone (remote « gdrive », dossier goangel_packs) ---
-RCLONE_REMOTE = "gdrive_wadoum:goangel_packs"
+RCLONE_REMOTE = "gdrive:goangel_packs"
 RCLONE_CONF_PATH = None
 
 
@@ -128,6 +130,10 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+
+
+class PromoRequest(BaseModel):
+    code: str = Field("", max_length=40)
 
 
 class PaymentRequest(BaseModel):
@@ -199,7 +205,6 @@ def rate_limited(ip: str, limit: int = 12, window: int = 60) -> bool:
 
 # ---------- Catalogue : Google Drive = source de vérité de la DISPONIBILITÉ ----------
 CATALOG_FILE = os.environ.get("CATALOG_FILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalog.json")
-CATALOG_REFRESH_SECONDS = max(30, int(os.environ.get("CATALOG_REFRESH_SECONDS", "300")))
 RECENT_DAYS = 14
 OUT_OF_STOCK_MESSAGE = ("Ce logiciel est actuellement épuisé. Nous préparons l'arrivée de nouvelles marques ou versions. "
                         "Merci de patienter, le produit sera de nouveau disponible dès son réapprovisionnement.")
@@ -276,12 +281,41 @@ def load_base_catalog() -> dict:
         return {"promo": {}, "products": mini}
 
 
+def normalize_promo(raw: dict) -> dict:
+    """Offre promotionnelle saisie dans l'admin (Firestore settings/promo)."""
+    code = re.sub(r"[^A-Za-z0-9_-]", "", str(raw.get("code") or "")).upper()[:30]
+    try:
+        pct = float(raw.get("percent") or 0)
+    except (TypeError, ValueError):
+        pct = 0.0
+    return {"enabled": raw.get("enabled") is True, "code": code, "percent": pct,
+            "pack": slug(raw.get("pack") or ""), "message": str(raw.get("message") or "").strip()[:200],
+            "expires": (str(raw.get("expires") or "").strip()[:25] or None), "banner": raw.get("banner") is not False}
+
+
+def load_promo_doc():
+    """dict = offre définie dans l'admin ; None = aucune (catalog.json sert de valeur par défaut) ; False = lecture impossible."""
+    if db is None:
+        return False
+    ref = db.collection("settings").document("promo")
+    try:
+        snap = ref.get(timeout=10)
+    except TypeError:
+        snap = ref.get()
+    return normalize_promo(snap.to_dict() or {}) if snap.exists else None
+
+
 def load_overrides():
     """Produits saisis dans l'admin (Firestore « packs ») ; None si Firestore est indisponible."""
     if db is None:
         return None
     out = []
-    for d in db.collection("packs").stream():
+    col = db.collection("packs")
+    try:
+        docs = col.stream(timeout=15)           # jamais d'attente infinie sur Firestore
+    except TypeError:
+        docs = col.stream()
+    for d in docs:
         n = normalize_product(d.to_dict() or {})
         if n:
             out.append(n)
@@ -338,10 +372,83 @@ def _parse_iso(s):
         return None
 
 
-def fetch_drive_files() -> dict:
-    """Liste réelle des ZIP présents sur Drive (UN appel rclone lsjson, aucun téléchargement)."""
-    if RCLONE_CONF_PATH is None:
-        raise DriveError("Stockage Google Drive non configuré côté serveur (secret RCLONE_CONFIG).")
+# ---------- Liste des ZIP sur Drive : un processus rclone persistant (rcd), sinon rclone lsjson ----------
+USE_RCD = os.environ.get("DRIVE_USE_RCD", "1") != "0"
+_rcd = {"proc": None, "port": 0, "auth": None, "next_try": 0.0}
+_rcd_lock = threading.Lock()
+_rcd_http = requests.Session()           # connexion HTTP locale réutilisée (keep-alive) entre deux vérifications
+
+
+def _rcd_stop():
+    p = _rcd.get("proc")
+    if p is not None and p.poll() is None:
+        try:
+            p.terminate()
+            p.wait(timeout=5)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+    _rcd["proc"] = None
+
+
+atexit.register(_rcd_stop)
+
+
+def _rcd_start() -> bool:
+    """Lance (au plus une fois toutes les 30 s) un démon rclone local : plus aucun processus à créer à chaque vérification."""
+    with _rcd_lock:
+        p = _rcd["proc"]
+        if p is not None and p.poll() is None:
+            return True
+        if RCLONE_CONF_PATH is None or time.time() < _rcd["next_try"]:
+            return False
+        _rcd["next_try"] = time.time() + 30
+        try:
+            s = socket.socket()
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+            s.close()
+            auth = (secrets.token_hex(8), secrets.token_hex(16))      # accès local protégé, jamais exposé
+            env = {k: v for k, v in os.environ.items() if k != "RCLONE_CONFIG"}
+            proc = subprocess.Popen(
+                ["rclone", "--config", RCLONE_CONF_PATH, "--retries", "3", "rcd", "--rc-addr", f"127.0.0.1:{port}",
+                 "--rc-user", auth[0], "--rc-pass", auth[1], "--log-level", "ERROR"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    return False
+                try:
+                    if _rcd_http.post(f"http://127.0.0.1:{port}/rc/noop", json={}, auth=auth, timeout=1).status_code == 200:
+                        _rcd.update(proc=proc, port=port, auth=auth)
+                        print("⚡ Démon rclone local prêt : vérification de Drive sans nouveau processus.")
+                        return True
+                except requests.exceptions.RequestException:
+                    pass
+                time.sleep(0.15)
+            proc.kill()
+        except Exception as e:
+            print(f"⚠️ Démon rclone non démarré ({type(e).__name__}) : repli sur rclone lsjson.")
+        return False
+
+
+def _items_via_rcd():
+    if not USE_RCD or not _rcd_start():
+        return None
+    try:
+        r = _rcd_http.post(f"http://127.0.0.1:{_rcd['port']}/operations/list", auth=_rcd["auth"], timeout=20,
+                          json={"fs": RCLONE_REMOTE, "remote": "", "opt": {"filesOnly": True}})
+        if r.status_code == 200:
+            return r.json().get("list", [])
+        print(f"⚠️ rcd operations/list : HTTP {r.status_code}")
+    except (requests.exceptions.RequestException, ValueError):
+        pass
+    return None
+
+
+def _items_via_lsjson():
     try:
         res = run_rclone(["lsjson", RCLONE_REMOTE, "--files-only"], timeout=60)
     except subprocess.TimeoutExpired:
@@ -350,9 +457,18 @@ def fetch_drive_files() -> dict:
         print(f"❌ rclone lsjson : {res.stderr[:200]}")
         raise DriveError("Google Drive inaccessible pour le moment.")
     try:
-        items = json.loads(res.stdout or "[]")
+        return json.loads(res.stdout or "[]")
     except ValueError:
         raise DriveError("Réponse Google Drive illisible.")
+
+
+def fetch_drive_files() -> dict:
+    """Liste réelle des ZIP présents sur Drive : une requête de LISTE (jamais de téléchargement de fichier)."""
+    if RCLONE_CONF_PATH is None:
+        raise DriveError("Stockage Google Drive non configuré côté serveur (secret RCLONE_CONFIG).")
+    items = _items_via_rcd()
+    if items is None:
+        items = _items_via_lsjson()
     files = {}
     for it in items:
         name = str(it.get("Name", ""))
@@ -405,9 +521,27 @@ def build_snapshot(products, files, drive_state, error, promo_cfg) -> dict:
             "synced_at": now.isoformat(), "ts": time.time()}
 
 
-_snapshot = {"items": [], "unlisted": [], "drive": "unknown", "error": None, "promo": {}, "synced_at": None, "ts": 0}
-_last_overrides = []
-_refresh_lock = threading.Lock()
+# ---------- Synchronisation AUTOMATIQUE avec Google Drive (côté serveur) ----------
+DRIVE_POLL_SECONDS = max(0.2, float(os.environ.get("DRIVE_POLL_SECONDS", "2")))   # vérification de Drive
+OVERRIDES_RELOAD_SECONDS = 60       # relecture des produits de l'admin (si l'écoute temps réel est indisponible)
+GRACE_SECONDS = 30                  # coupure Drive très brève : l'état connu est conservé (les achats revérifient toujours)
+STALL_SECONDS = max(30.0, DRIVE_POLL_SECONDS * 15)   # surveillance bloquée au-delà : redémarrage automatique
+SUPERVISOR_SECONDS = 10
+
+_state_lock = threading.Lock()      # protège uniquement l'échange d'état en mémoire, jamais un appel réseau
+_snapshot = {"items": [], "unlisted": [], "drive": "unknown", "error": None, "promo": {}, "synced_at": None, "ts": 0,
+             "version": "", "checked_at": None, "changed_at": None}
+_products = None                    # (produits fusionnés, config promo)
+_products_key = None
+_products_version = 0
+_overrides = []
+_promo_doc = None                   # offre promo définie dans l'admin (prioritaire sur catalog.json)
+_listener_ok = False
+_last_build_key = None
+_last_good = 0.0
+_started = False
+_watch = {"gen": 0, "beat": 0.0, "fails": 0}
+_base_cache = {"mtime": None, "data": None}
 
 
 def _log_changes(old, new):
@@ -424,38 +558,200 @@ def _log_changes(old, new):
     for pid in prev:
         if pid not in {i['id'] for i in new["items"]}:
             print(f"➖ Produit retiré du catalogue : {pid}")
+    if old["drive"] != new["drive"] and old["ts"]:
+        print(f"📡 Google Drive : {old['drive']} → {new['drive']}")
 
 
-def refresh_catalog() -> dict:
-    """Relit catalog.json, les produits Firestore et la liste réelle des ZIP sur Drive."""
-    global _snapshot, _last_overrides
-    with _refresh_lock:
-        base = load_base_catalog()
+def _load_base_cached() -> dict:
+    try:
+        m = os.stat(CATALOG_FILE).st_mtime
+    except OSError:
+        m = None
+    if _base_cache["data"] is None or _base_cache["mtime"] != m:
+        _base_cache.update(mtime=m, data=load_base_catalog())
+    return _base_cache["data"]
+
+
+def load_products(reload_overrides: bool = False):
+    """Produits = catalog.json + fiches de l'admin (Firestore). Relit Firestore seulement à la demande."""
+    global _products, _products_key, _products_version, _overrides, _promo_doc
+    if reload_overrides:
         try:
             ov = load_overrides()
             if ov is not None:
-                _last_overrides = ov
+                _overrides = ov
         except Exception as e:
             print(f"⚠️ Lecture des produits Firestore impossible ({type(e).__name__}) : dernière version connue conservée.")
-        products = merge_products(base["products"], _last_overrides)
+    if reload_overrides:
         try:
-            files, state, err = fetch_drive_files(), "ok", None
-        except DriveError as e:
-            files, state, err = None, ("unconfigured" if RCLONE_CONF_PATH is None else "error"), str(e)
-        snap = build_snapshot(products, files, state, err, base["promo"])
+            pd = load_promo_doc()
+            if pd is not False:
+                _promo_doc = pd
+        except Exception as e:
+            print(f"⚠️ Lecture de l'offre promo impossible ({type(e).__name__}) : dernière version connue conservée.")
+    base = _load_base_cached()
+    prods = merge_products(base["products"], _overrides)
+    promo_cfg = _promo_doc if _promo_doc is not None else base["promo"]
+    key = json.dumps([prods, promo_cfg], sort_keys=True, default=str)
+    with _state_lock:
+        if _products is None or key != _products_key:
+            _products, _products_key = (prods, promo_cfg), key
+            _products_version += 1
+
+
+def drive_listing_now():
+    global _last_good
+    try:
+        files = fetch_drive_files()
+        _last_good = time.time()
+        return files, None
+    except DriveError as e:
+        return None, str(e)
+
+
+def _catalog_version(snap: dict, promo) -> str:
+    payload = json.dumps([[public_item(i) for i in snap["items"]], promo, snap["drive"]], sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode()).hexdigest()[:12]
+
+
+def rebuild(files, err) -> dict:
+    """Reconstruit le catalogue SEULEMENT si quelque chose a changé (fichiers, produits, état Drive, promo)."""
+    global _snapshot, _last_build_key
+    prods, promo_cfg = _products
+    promo = active_promo(promo_cfg)
+    state = "ok" if files is not None else ("unconfigured" if RCLONE_CONF_PATH is None else "error")
+    sig = hashlib.sha1(json.dumps(sorted((k, v["size"], v["modified"]) for k, v in (files or {}).items())).encode()).hexdigest()
+    key = (sig, _products_version, state, json.dumps(promo, sort_keys=True, default=str))
+    now = datetime.now(timezone.utc).isoformat()
+    if key == _last_build_key:
+        with _state_lock:
+            _snapshot = {**_snapshot, "checked_at": now, "ts": time.time()}
+            return _snapshot
+    snap = build_snapshot(prods, files, state, err, promo_cfg)
+    snap["version"] = _catalog_version(snap, promo)
+    snap["checked_at"] = snap["changed_at"] = snap["synced_at"]
+    with _state_lock:
         _log_changes(_snapshot, snap)
-        _snapshot = snap
-        return snap
+        _snapshot, _last_build_key = snap, key
+    return snap
+
+
+def refresh_catalog(reload_overrides: bool = False) -> dict:
+    """Vérification immédiate (admin, achat) : relit Drive maintenant, sans attendre la prochaine passe."""
+    if _products is None or reload_overrides:
+        load_products(reload_overrides)
+    files, err = drive_listing_now()
+    return rebuild(files, err)
 
 
 def get_snapshot() -> dict:
-    snap = _snapshot
-    if time.time() - snap["ts"] > CATALOG_REFRESH_SECONDS * 3 and not _refresh_lock.locked():
+    return _snapshot
+
+
+def _drive_loop(gen: int):
+    fails = 0
+    while _watch["gen"] == gen:
+        t0 = time.time()
         try:
-            return refresh_catalog()
+            if _products is None:
+                load_products(False)
+            files, err = drive_listing_now()
+            _watch["beat"] = time.time()
+            fails = 0 if files is not None else fails + 1
+            _watch["fails"] = fails
+            if files is None and _snapshot["drive"] == "ok" and time.time() - _last_good < GRACE_SECONDS:
+                pass                                   # coupure brève : on garde l'état connu
+            else:
+                rebuild(files, err)
+        except Exception as e:
+            fails += 1
+            _watch["fails"] = fails
+            print(f"⚠️ Surveillance de Drive : erreur ({type(e).__name__}).")
+        pause = DRIVE_POLL_SECONDS if fails == 0 else min(10.0, DRIVE_POLL_SECONDS * 2 ** min(fails, 6))   # recul si Drive refuse
+        time.sleep(max(0.05, pause - (time.time() - t0)) if fails == 0 else pause)
+
+
+def _spawn_drive_loop():
+    _watch["gen"] += 1
+    _watch["beat"] = time.time()
+    threading.Thread(target=_drive_loop, args=(_watch["gen"],), daemon=True, name="drive-watch").start()
+
+
+def _products_loop():
+    last = 0.0
+    while True:
+        try:
+            now = time.time()
+            reload = now - last >= (600 if _listener_ok else OVERRIDES_RELOAD_SECONDS)
+            load_products(reload)                      # relit aussi catalog.json s'il a changé (simple stat)
+            if reload:
+                last = now
+        except Exception as e:
+            print(f"⚠️ Chargement des produits : erreur ({type(e).__name__}).")
+        time.sleep(5)
+
+
+def _supervisor():
+    while True:
+        time.sleep(SUPERVISOR_SECONDS)
+        try:
+            if time.time() - _watch["beat"] > STALL_SECONDS:
+                print("⚠️ Surveillance de Drive bloquée : redémarrage automatique.")
+                _spawn_drive_loop()
         except Exception:
             pass
-    return snap
+
+
+def _start_overrides_listener():
+    """Les fiches produit de l'admin arrivent en temps réel (aucune relecture périodique de Firestore)."""
+    global _listener_ok
+    if db is None:
+        return
+    def on_change(col_snapshot, changes, read_time):
+        global _overrides
+        try:
+            out = []
+            for d in col_snapshot:
+                n = normalize_product(d.to_dict() or {})
+                if n:
+                    out.append(n)
+            _overrides = out
+            load_products(False)
+        except Exception as e:
+            print(f"⚠️ Écoute Firestore : erreur ({type(e).__name__}).")
+    def on_promo(doc_snapshots, changes, read_time):
+        global _promo_doc
+        try:
+            d = doc_snapshots[0] if doc_snapshots else None
+            _promo_doc = normalize_promo(d.to_dict() or {}) if d is not None and d.exists else None
+            load_products(False)
+        except Exception as e:
+            print(f"⚠️ Écoute de l'offre promo : erreur ({type(e).__name__}).")
+    ok_packs = ok_promo = False
+    try:
+        db.collection("packs").on_snapshot(on_change)
+        ok_packs = True
+    except Exception as e:
+        print(f"⚠️ Écoute temps réel des produits indisponible ({type(e).__name__}) : relecture toutes les {OVERRIDES_RELOAD_SECONDS} s.")
+    try:
+        db.collection("settings").document("promo").on_snapshot(on_promo)
+        ok_promo = True
+    except Exception as e:
+        print(f"⚠️ Écoute temps réel de l'offre promo indisponible ({type(e).__name__}) : relecture toutes les {OVERRIDES_RELOAD_SECONDS} s.")
+    _listener_ok = ok_packs and ok_promo          # relecture lente de secours seulement si TOUT est écouté en temps réel
+
+
+def start_background():
+    global _started
+    if _started:
+        return
+    _started = True
+    load_products(False)                               # la boutique est utilisable dès le démarrage
+    _start_overrides_listener()
+    threading.Thread(target=_products_loop, daemon=True, name="products").start()
+    _spawn_drive_loop()
+    threading.Thread(target=_supervisor, daemon=True, name="watch-supervisor").start()
+    print(f"🔁 Synchronisation Drive automatique : vérification toutes les {DRIVE_POLL_SECONDS:g} s.")
 
 
 def public_item(it: dict) -> dict:
@@ -474,7 +770,7 @@ def active_promo(cfg: dict) -> Optional[dict]:
             return None
         code = str(cfg.get("code") or "").strip().upper()
         pct = float(cfg.get("percent") or 0)
-        if not code or not (0 < pct < 100):
+        if not code or not (0 < pct <= 90):          # plafond de sécurité : une faute de frappe ne peut pas offrir un pack
             return None
         exp = cfg.get("expires")
         if exp:
@@ -482,19 +778,39 @@ def active_promo(cfg: dict) -> Optional[dict]:
             if d is None or d < datetime.now(timezone.utc):
                 return None
         return {"code": code, "percent": pct, "pack_id": slug(cfg.get("pack") or "") or None,
-                "message": str(cfg.get("message") or f"-{pct:g}% avec le code {code}")[:200], "expires": exp or None}
+                "message": str(cfg.get("message") or f"-{pct:g}% avec le code {code}")[:200], "expires": exp or None,
+                "banner": cfg.get("banner") is not False}
     except Exception:
         return None
 
 
+def _mine(promo: dict) -> dict:
+    return {"code": promo["code"], "percent": promo["percent"], "pack_id": promo["pack_id"]}
+
+
+def my_promo_for(uid: str, promo: Optional[dict]) -> Optional[dict]:
+    """Réduction de CE compte uniquement : il faut qu'il ait lui-même appliqué le code en vigueur."""
+    if not promo or db is None:
+        return None
+    try:
+        snap = db.collection("promo_redemptions").document(uid).get()
+        d = snap.to_dict() if snap.exists else None
+    except Exception:
+        return None
+    return _mine(promo) if d and d.get("code") == promo["code"] else None
+
+
 def verified_product(product_id: str):
     """Revérifie Drive AU MOMENT de l'achat : jamais de paiement pour un fichier absent ou invérifiable."""
-    snap = refresh_catalog()
+    if _products is None:
+        load_products(True)
+    files, err = drive_listing_now()                   # liste fraîche (jamais le cache de la surveillance)
+    if files is None:
+        raise HTTPException(status_code=503, detail="Impossible de vérifier la disponibilité du logiciel (Google Drive injoignable). Aucun paiement n'a été créé, réessayez dans un instant.")
+    snap = rebuild(files, None)
     item = next((i for i in snap["items"] if i["id"] == product_id), None)
     if item is None:
         raise HTTPException(status_code=404, detail="Pack inconnu.")
-    if item["state"] == "unknown":
-        raise HTTPException(status_code=503, detail="Impossible de vérifier la disponibilité du logiciel (Google Drive injoignable). Aucun paiement n'a été créé, réessayez dans un instant.")
     if item["state"] == "unavailable":
         raise HTTPException(status_code=409, detail=OUT_OF_STOCK_MESSAGE)
     return item, snap
@@ -515,8 +831,13 @@ def admin_claims(authorization: Optional[str]) -> dict:
 
 
 def admin_view(snap: dict) -> dict:
+    age = round(time.time() - snap["ts"], 1) if snap["ts"] else None
     return {
         "drive": snap["drive"], "error": snap["error"], "synced_at": snap["synced_at"],
+        "checked_at": snap["checked_at"], "changed_at": snap["changed_at"], "checked_age_seconds": age,
+        "poll_seconds": DRIVE_POLL_SECONDS, "watcher_fails": _watch["fails"], "realtime_products": _listener_ok,
+        "promo": active_promo(snap["promo"]), "promo_config": snap["promo"] or {},
+        "promo_source": "admin" if _promo_doc is not None else "catalog.json",
         "products": [{"id": i["id"], "name": i["name"], "price_usdt": i["price_usdt"], "state": i["state"],
                       "version": i["sold_version"], "file": i["file"], "recently_updated": i["recent"],
                       "archived": i["archived"]} for i in snap["items"]],
@@ -532,7 +853,8 @@ def health_check():
         "status": "ok", "model": MODEL_NAME,
         "firebase": db is not None, "storage": RCLONE_CONF_PATH is not None,
         "nowpayments_key": bool(NOWPAYMENTS_API_KEY),
-        "catalog": {"drive": _snapshot["drive"], "products": len(_snapshot["items"]), "synced_at": _snapshot["synced_at"]},
+        "catalog": {"drive": _snapshot["drive"], "products": len(_snapshot["items"]), "checked_at": _snapshot["checked_at"],
+                    "poll_seconds": DRIVE_POLL_SECONDS, "watcher_fails": _watch["fails"]},
     }
 
 
@@ -822,13 +1144,49 @@ def download_file(payment_id: str, token: Optional[str] = Query(None, max_length
 # ---------- Catalogue public (connecté) et administration ----------
 @app.get("/api/catalog")
 def catalog(http: Request, authorization: Optional[str] = Header(None)):
-    current_uid(authorization)
+    uid = current_uid(authorization)
     ip = http.headers.get("cf-connecting-ip") or (http.client.host if http.client else "?")
     if rate_limited("cat:" + ip, limit=60):
         raise HTTPException(status_code=429, detail="Trop de requêtes, patientez un instant.")
     snap = get_snapshot()
-    return {"products": [public_item(i) for i in snap["items"]], "promo": active_promo(snap["promo"]),
-            "drive": snap["drive"], "synced_at": snap["synced_at"], "refresh_seconds": CATALOG_REFRESH_SECONDS}
+    promo = active_promo(snap["promo"])
+    public = {k: promo[k] for k in ("code", "percent", "pack_id", "message", "expires")} if promo and promo["banner"] else None
+    return {"products": [public_item(i) for i in snap["items"]], "promo": public, "my_promo": my_promo_for(uid, promo),
+            "drive": snap["drive"], "synced_at": snap["synced_at"], "checked_at": snap["checked_at"],
+            "version": snap["version"], "refresh_seconds": DRIVE_POLL_SECONDS}
+
+
+@app.post("/api/promo/apply")
+def promo_apply(req: PromoRequest, http: Request, authorization: Optional[str] = Header(None)):
+    """Applique le code au compte connecté SEULEMENT (enregistré côté serveur, jamais partagé avec les autres comptes)."""
+    uid = current_uid(authorization)
+    ip = http.headers.get("cf-connecting-ip") or (http.client.host if http.client else "?")
+    if rate_limited("promo:" + ip, limit=20):
+        raise HTTPException(status_code=429, detail="Trop d'essais, patientez une minute.")
+    promo = active_promo(get_snapshot()["promo"])
+    code = (req.code or "").strip().upper()
+    if not promo or not code or not hmac.compare_digest(code, promo["code"]):
+        raise HTTPException(status_code=400, detail="Code promo invalide ou expiré.")
+    db.collection("promo_redemptions").document(uid).set({"code": code, "applied_at": firestore.SERVER_TIMESTAMP})
+    return {"promo": _mine(promo)}
+
+
+@app.post("/api/promo/clear")
+def promo_clear(authorization: Optional[str] = Header(None)):
+    uid = current_uid(authorization)
+    db.collection("promo_redemptions").document(uid).delete()
+    return {"promo": None}
+
+
+@app.get("/api/catalog-version")
+def catalog_version(http: Request, authorization: Optional[str] = Header(None)):
+    """Réponse minuscule interrogée par le site : le catalogue complet n'est rechargé que si la version a changé."""
+    current_uid(authorization)
+    ip = http.headers.get("cf-connecting-ip") or (http.client.host if http.client else "?")
+    if rate_limited("ver:" + ip, limit=120):
+        raise HTTPException(status_code=429, detail="Trop de requêtes, patientez un instant.")
+    snap = get_snapshot()
+    return {"version": snap["version"], "checked_at": snap["checked_at"], "drive": snap["drive"]}
 
 
 @app.get("/api/admin/catalog")
@@ -839,23 +1197,14 @@ def admin_catalog(authorization: Optional[str] = Header(None)):
 
 @app.post("/api/admin/sync")
 def admin_sync(authorization: Optional[str] = Header(None)):
-    """Synchronisation à la demande : relit Drive, catalog.json et les produits de l'admin."""
+    """Vérification immédiate facultative : la synchronisation automatique tourne déjà seule."""
     admin_claims(authorization)
-    return admin_view(refresh_catalog())
-
-
-def _sync_loop():
-    while True:
-        try:
-            refresh_catalog()
-        except Exception as e:
-            print(f"⚠️ Synchronisation du catalogue en échec ({type(e).__name__}).")
-        time.sleep(CATALOG_REFRESH_SECONDS)
+    return admin_view(refresh_catalog(reload_overrides=True))
 
 
 @app.on_event("startup")
-def _start_catalog_sync():
-    threading.Thread(target=_sync_loop, daemon=True).start()
+def _on_startup():
+    start_background()
 
 
 if __name__ == "__main__":

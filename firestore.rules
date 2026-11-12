@@ -27,6 +27,14 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow write: if isAdmin();
     }
+    // Offre promotionnelle : modifiable uniquement par l'admin (lue par le backend)
+    match /settings/{id} {
+      allow read, write: if isAdmin();
+    }
+    // Réductions appliquées par compte : écrites uniquement par le backend
+    match /promo_redemptions/{uid} {
+      allow read, write: if false;
+    }
     // Commandes : écrites uniquement par le backend (Admin SDK ignore ces règles)
     match /orders/{orderId} {
       allow read, write: if false;
